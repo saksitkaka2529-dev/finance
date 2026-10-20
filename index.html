@@ -89,10 +89,34 @@
   'use strict';
   var WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbx4okQj0yKvo4edkTq8JvQrod4MHFnboi50_lfB3m6WxuGnEVr4NxvIIegJy1yPZi5_/exec';
   var GAS = typeof google !== 'undefined' && google.script && google.script.run;
-  if (!GAS) {
-    location.replace(WEB_APP_URL);
-    return;
-  }
+  var bridgePort=null,bridgeSequence=0,bridgePending={};
+  var bridgeReady=GAS?Promise.resolve(null):new Promise(function(resolve){
+    var bytes=new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    var key=Array.from(bytes).map(function(b){return ('0'+b.toString(16)).slice(-2)}).join('');
+    var frame=document.createElement('iframe');
+    frame.title='การเชื่อมต่อข้อมูล';
+    frame.setAttribute('aria-hidden','true');
+    frame.style.cssText='position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;border:0;left:-9999px;top:0';
+    frame.src=WEB_APP_URL+(WEB_APP_URL.indexOf('?')<0?'?':'&')+'bridge=1&channel='+key;
+    window.addEventListener('message',function(event){
+      var message=event.data||{};
+      if(message.kind!=='finance-bridge-ready'||message.channel!==key||!event.ports||!event.ports[0])return;
+      if(event.origin!=='null'&&!/^https:\/\/(?:[a-z0-9-]+\.)*(?:googleusercontent\.com|google\.com)$/i.test(event.origin))return;
+      bridgePort=event.ports[0];
+      bridgePort.onmessage=function(response){
+        var data=response.data||{},pending=bridgePending[data.id];
+        if(!pending)return;
+        clearTimeout(pending.timer);
+        delete bridgePending[data.id];
+        if(data.ok)pending.resolve(data.value);
+        else pending.reject(new Error(data.error||'เกิดข้อผิดพลาดในการเชื่อมข้อมูล'));
+      };
+      bridgePort.start();
+      resolve(bridgePort);
+    });
+    document.body.appendChild(frame);
+  });
   var roles={REQUESTER:'ผู้ขอเบิก',FINANCE:'เจ้าหน้าที่การเงิน',APPROVER:'ผู้อนุมัติ',ADMIN:'ผู้ดูแลระบบ',AUDITOR:'ผู้ตรวจสอบ'};
   var statuses={DRAFT:'ร่าง',SUBMITTED:'ส่งตรวจ',RETURNED:'ส่งกลับแก้ไข',VERIFIED:'รออนุมัติ',APPROVED:'อนุมัติแล้ว',REJECTED:'ไม่อนุมัติ',PAID:'จ่ายแล้ว',CLOSED:'ปิดฎีกา',CANCELLED:'ยกเลิก'};
   var titles={dashboard:['ภาพรวมการเบิกจ่าย','ติดตามสถานะฎีกาและยอดจ่ายจากข้อมูลล่าสุด'],registry:['ทะเบียนฎีกา','ค้นหาและเปิดหลักฐานย้อนหลัง'],form:['สร้างฎีกา','บันทึกร่างก่อนแนบเอกสารและส่งตรวจ'],reports:['รายงานทะเบียนฎีกา','กรองข้อมูลและส่งออก CSV'],budgets:['งบประมาณ','ยอดจัดสรร ยอดผูกพัน ยอดจ่าย และยอดคงเหลือ'],admin:['ตั้งค่าระบบ','ข้อมูลหน่วยงาน ประเภทค่าใช้จ่าย และรายการตรวจเอกสาร'],users:['เพิ่มผู้ใช้งาน','สร้างบัญชี กำหนดบทบาท และจัดการผู้ใช้ในระบบ']};
@@ -111,7 +135,8 @@
   function toggleCustomFundSource(){var select=$('fundSourceSelect'),field=$('customFundSourceField'),input=$('customFundSource');if(!select||!field||!input)return;var custom=select.value==='__OTHER__';field.classList.toggle('hidden',!custom);input.required=custom;if(custom)input.focus()}
   function toast(msg,error){var t=$('toast');t.textContent=msg;t.className='toast show'+(error?' error':'');clearTimeout(state.toastTimer);state.toastTimer=setTimeout(function(){t.className='toast'},5000)}
   function loading(flag){state.busy=Math.max(0,state.busy+(flag?1:-1));$('loading').classList.toggle('show',state.busy>0)}
-  function api(name){var args=[].slice.call(arguments,1);return new Promise(function(resolve,reject){if(!GAS){reject(new Error('ไม่พบการเชื่อมต่อ Apps Script'));return}if(name!=='login')args.unshift(authToken);var runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(function(e){reject(new Error(e&&e.message||String(e)))});runner[name].apply(runner,args)})}
+  function waitBridge(){if(bridgePort)return Promise.resolve(bridgePort);return new Promise(function(resolve,reject){var timer=setTimeout(function(){reject(new Error('เชื่อมต่อข้อมูลไม่สำเร็จ กรุณาตรวจการเผยแพร่ Web App และสิทธิ์เข้าถึง'))},25000);bridgeReady.then(function(port){clearTimeout(timer);resolve(port)})})}
+  function api(name){var args=[].slice.call(arguments,1);if(name!=='login')args.unshift(authToken);if(GAS)return new Promise(function(resolve,reject){var runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(function(e){reject(new Error(e&&e.message||String(e)))});runner[name].apply(runner,args)});return waitBridge().then(function(port){return new Promise(function(resolve,reject){var id=++bridgeSequence;var timer=setTimeout(function(){delete bridgePending[id];reject(new Error('รอข้อมูลจาก GAS นานเกินไป กรุณาลองใหม่'))},name==='uploadAttachment'?120000:45000);bridgePending[id]={resolve:resolve,reject:reject,timer:timer};try{port.postMessage({id:id,name:name,args:args})}catch(error){clearTimeout(timer);delete bridgePending[id];reject(error)}})})}
   async function call(name,args,success){loading(true);try{var result=await api.apply(null,[name].concat(args||[]));state.lastError='';if(success)await success(result);return result}catch(e){state.lastError=e.message||String(e);if(name!=='login'&&state.lastError.indexOf('SESSION_EXPIRED')>=0){clearToken();state.bootstrap=null;closeDetail();showLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่')}else if(state.lastError.indexOf('PASSWORD_CHANGE_REQUIRED')>=0)showChange('กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน');else toast(state.lastError,true);return null}finally{loading(false)}}
   function storeToken(token){authToken=token;try{sessionStorage.setItem('finance_auth_token',token)}catch(e){}}
   function clearToken(){authToken='';try{sessionStorage.removeItem('finance_auth_token')}catch(e){}}
