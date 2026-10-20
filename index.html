@@ -1,858 +1,190 @@
-/**
- * ระบบฎีกาเบิกจ่าย รพ.สต.บ้านทับสอ
- * Run setupSystem once from the Apps Script editor as the script owner.
- * Deploy as a web app, execute as owner, and require Google sign-in for access.
- * Users authenticate with the username/password created in the Users sheet.
- */
-var APP_TZ = 'Asia/Bangkok';
-// If this script was created at script.google.com (not from the target Sheet),
-// paste the Sheet ID from its URL here before running useThisSpreadsheet.
-var TARGET_SPREADSHEET_ID = '';
-var APP_SHEETS = {
-  Requests: ['id','number','version','fiscalYear','requestDate','createdAt','updatedAt','requesterEmail','requesterName','unit','requestType','category','fundSource','project','payeeName','payeeAddress','memo','total','status','reviewerNote','approverNote','cancelledReason'],
-  RequestItems: ['id','requestId','version','description','quantity','unit','unitPrice','amount','active','createdAt'],
-  ApprovalsLog: ['id','requestId','stage','decision','comment','actorEmail','actorName','actorRole','at'],
-  Payments: ['id','requestId','paymentDate','method','reference','amount','actorEmail','at'],
-  Attachments: ['id','requestId','docType','fileId','fileName','mimeType','size','uploadedBy','uploadedAt','active'],
-  Budgets: ['id','fiscalYear','fundSource','category','allocated','updatedAt','updatedBy'],
-  Users: ['email','name','role','active','createdAt','updatedAt','username','passwordSalt','passwordHash','mustChangePassword','failedAttempts','lockedUntilMs','authVersion'],
-  Settings: ['key','valueJson','updatedAt','updatedBy'],
-  AuditLog: ['id','requestId','actorEmail','actorRole','action','detailsJson','at']
-};
-var APP_ROLES = ['REQUESTER','FINANCE','APPROVER','ADMIN','AUDITOR'];
-var APP_STATUSES = ['DRAFT','SUBMITTED','RETURNED','VERIFIED','APPROVED','REJECTED','PAID','CLOSED','CANCELLED'];
-var MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-var SESSION_SECONDS = 21600;
-var LOGIN_LOCK_MS = 15 * 60 * 1000;
-var LOGIN_MAX_FAILURES = 5;
-
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile('index')
-    .setTitle('ระบบฎีกาเบิกจ่าย | รพ.สต.บ้านทับสอ')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
-
-/** Select this function in the Apps Script editor and run it once. */
-function setupSystem() {
-  return setupSystem_();
-}
-
-/**
- * Run once to use the existing Google Sheet instead of the separate file
- * created by the earlier setup. Existing system data is copied; old file stays as backup.
- */
-function useThisSpreadsheet() {
-  var owner = setupOwner_();
-  var target = selectedSpreadsheet_();
-  if (!target) throw new Error('ไม่พบชีตที่ผูกกับสคริปต์ กรุณาใส่ ID ชีตใน TARGET_SPREADSHEET_ID แล้วเรียกใช้อีกครั้ง');
-  var props = PropertiesService.getScriptProperties();
-  var sourceId = props.getProperty('SPREADSHEET_ID');
-  if (!sourceId) throw new Error('ยังไม่ได้ตั้งค่าระบบ ให้รัน setupSystem ก่อน');
-  if (target.getId() === sourceId) {
-    Logger.log('ระบบใช้ชีตนี้อยู่แล้ว: ' + target.getUrl());
-    return {spreadsheetUrl:target.getUrl(),alreadyConnected:true};
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ระบบฎีกาเบิกจ่าย | รพ.สต.บ้านทับสอ</title>
+  <style>
+    :root{--navy:#14283f;--navy2:#203b59;--blue:#1778a8;--teal:#0d8a87;--bg:#f4f7fa;--card:#fff;--text:#183047;--muted:#65798c;--line:#dbe4eb;--danger:#b83c48;--warn:#b66a14;--ok:#237a54;--shadow:0 12px 36px rgba(27,56,83,.08)}
+    *{box-sizing:border-box}html{font-family:Tahoma,"Segoe UI",sans-serif;color:var(--text);background:var(--bg)}body{margin:0;min-height:100vh}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}
+    .app{display:flex;min-height:100vh}.sidebar{width:258px;flex:none;background:var(--navy);color:#fff;padding:24px 16px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+    .brand{padding:5px 12px 25px;border-bottom:1px solid #ffffff26}.brand-mark{display:inline-grid;place-items:center;width:39px;height:39px;background:#e1f4f3;color:var(--teal);border-radius:11px;font-size:23px;font-weight:800;margin-bottom:12px}.brand strong{display:block;font-size:17px;line-height:1.45}.brand small{display:block;color:#b7cada;margin-top:5px;line-height:1.4}
+    .nav{display:grid;gap:5px;padding-top:22px}.nav button{background:transparent;border:0;color:#c8d8e6;text-align:left;padding:12px 14px;border-radius:10px;display:flex;gap:10px;align-items:center}.nav button:hover,.nav button.active{background:#ffffff19;color:#fff}.nav button.active{box-shadow:inset 3px 0 #55cfbf}.nav .ico{width:22px;text-align:center;font-size:18px}
+    .profile{margin-top:auto;padding:14px 12px;border-top:1px solid #ffffff26;font-size:13px;line-height:1.5}.profile b{display:block;font-size:14px}.profile span{color:#a9c3d5}
+    main{flex:1;min-width:0;padding:28px clamp(16px,3vw,42px) 60px}.topbar{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:24px}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.09em;font-weight:700;color:var(--teal);margin:0 0 5px}.topbar h1{font-size:28px;line-height:1.25;margin:0}.topbar p{color:var(--muted);margin:7px 0 0}.top-actions{display:flex;gap:9px;align-items:center}
+    .btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:9px;padding:10px 15px;font-weight:700;min-height:40px}.btn:hover{border-color:var(--blue);color:var(--blue)}.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}.btn.primary:hover{background:#12668e}.btn.teal{background:var(--teal);border-color:var(--teal);color:#fff}.btn.danger{background:#fff5f5;border-color:#edc8cc;color:var(--danger)}.btn.small{padding:6px 10px;min-height:31px;font-size:12px}.btn.ghost{background:transparent}
+    .grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:18px}.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:var(--shadow)}.stat .label{font-size:13px;color:var(--muted)}.stat .number{font-size:30px;font-weight:800;margin:9px 0 1px}.stat .sub{font-size:12px;color:var(--muted)}
+    .two{grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:20px;margin-bottom:16px}.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}.card h2{font-size:17px;margin:0}.card h3{font-size:15px;margin:0 0 15px}.muted{color:var(--muted)}.tiny{font-size:12px}.empty{text-align:center;padding:30px 15px;color:var(--muted)}
+    .table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}.table th{text-align:left;color:var(--muted);font-weight:700;background:#f6f9fb;padding:11px 10px;border-bottom:1px solid var(--line)}.table td{padding:11px 10px;border-bottom:1px solid #eaf0f4}.table tr:last-child td{border-bottom:0}.table tr.clickable{cursor:pointer}.table tr.clickable:hover{background:#f5fbfe}.right{text-align:right!important}.center{text-align:center!important}
+    .badge{display:inline-block;padding:5px 9px;border-radius:999px;background:#edf2f6;color:#52687b;font-size:11px;font-weight:700}.badge.DRAFT{background:#edf2f6}.badge.SUBMITTED,.badge.VERIFIED{background:#e9f1fd;color:#2c67a6}.badge.RETURNED,.badge.REJECTED{background:#fff1e4;color:#a56013}.badge.APPROVED{background:#e5f7f2;color:#147760}.badge.PAID,.badge.CLOSED{background:#e6f6e9;color:#237a54}.badge.CANCELLED{background:#f7e9ea;color:#a8454e}
+    .bar-row{display:grid;grid-template-columns:72px 1fr 95px;gap:10px;align-items:center;margin:10px 0;font-size:12px}.bar-track{height:11px;border-radius:9px;background:#eaf0f4;overflow:hidden}.bar-fill{height:100%;background:linear-gradient(90deg,#2b95ba,#36b6aa);border-radius:9px}
+    .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}.filters>*{flex:1;min-width:150px}.field{display:grid;gap:6px;min-width:0}.field label{font-size:12px;font-weight:700;color:#52687b}.field input,.field select,.field textarea,.filters input,.filters select{width:100%;border:1px solid #cbd8e2;background:#fff;border-radius:8px;padding:10px 11px;outline:0;color:var(--text);min-height:40px}.field input:focus,.field select:focus,.field textarea:focus,.filters input:focus,.filters select:focus{border-color:var(--blue);box-shadow:0 0 0 3px #1778a81b}.field textarea{min-height:76px;resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px}.field.span2{grid-column:span 2}.field.span3{grid-column:span 3}.form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}.section-note{font-size:12px;color:var(--muted);margin:4px 0 16px;line-height:1.5}
+    .item-grid{display:grid;grid-template-columns:minmax(220px,3fr) 90px 90px 125px 130px 36px;gap:8px;align-items:end;margin-bottom:9px}.item-grid label{font-size:11px;color:var(--muted)}.item-grid input{width:100%;border:1px solid #cbd8e2;border-radius:8px;padding:9px;min-height:39px}.item-amount{padding:10px 0;text-align:right;font-weight:700}.total-line{display:flex;justify-content:flex-end;gap:20px;border-top:1px solid var(--line);padding-top:15px;font-weight:700}.total-line strong{font-size:20px;color:var(--blue)}
+    .overlay{position:fixed;inset:0;background:#0b1c2c9c;z-index:20;display:none;overflow:auto;padding:24px}.overlay.show{display:flex;justify-content:center;align-items:flex-start}.dialog{width:min(100%,970px);background:#fff;border-radius:16px;box-shadow:0 26px 70px #0004;padding:23px;margin:auto}.dialog-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px}.dialog-head h2{margin:0;font-size:21px}.dialog-close{border:0;background:#edf2f6;border-radius:8px;width:34px;height:34px;font-size:20px}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.kv{padding:9px 0;border-bottom:1px solid #eaf0f4}.kv span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.kv b{font-size:13px;overflow-wrap:anywhere}.detail-section{margin-top:22px}.detail-section h3{font-size:15px;margin:0 0 12px}.action-box{background:#f5f9fb;border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:20px}.action-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.upload-row,.payment-row{display:flex;gap:9px;flex-wrap:wrap;align-items:end}.upload-row>*{flex:1;min-width:160px}.payment-row>*{flex:1;min-width:120px}.history{display:grid;gap:7px}.history-entry{padding:9px 11px;background:#f7fafc;border-left:3px solid #b7d3e2;border-radius:5px;font-size:12px;line-height:1.45}.history-entry b{margin-right:7px}
+    .split-admin{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,.8fr);gap:16px}.footer-hint{font-size:11px;color:var(--muted);line-height:1.5}.hidden{display:none!important}.loading{position:fixed;inset:0;background:#ffffffb8;z-index:50;display:none;place-items:center}.loading.show{display:grid}.spinner{width:42px;height:42px;border:4px solid #dce9f0;border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.toast{position:fixed;right:22px;bottom:22px;z-index:60;background:#183047;color:#fff;border-radius:10px;padding:12px 16px;box-shadow:var(--shadow);display:none;max-width:min(420px,90vw);font-size:13px;line-height:1.5}.toast.show{display:block}.toast.error{background:#a33442}
+    .auth-screen{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 80% 15%,#2d7181 0,#203d57 36%,#14283f 78%)}.auth-card{width:min(100%,430px);background:#fff;border-radius:18px;padding:32px;box-shadow:0 30px 70px #081b2d70}.auth-card .brand-mark{display:grid}.auth-card h1{font-size:24px;margin:3px 0 8px}.auth-card p{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 22px}.auth-card .field{margin-bottom:15px}.auth-card .btn{width:100%;margin-top:5px}.auth-error{min-height:20px;color:var(--danger);font-size:12px;margin:8px 0}.profile .btn{width:100%;margin-top:10px;background:#ffffff12;color:#fff;border-color:#ffffff35}
+    @media(max-width:1000px){.stats{grid-template-columns:repeat(2,1fr)}.two,.split-admin{grid-template-columns:1fr}.form-grid{grid-template-columns:repeat(2,1fr)}.field.span3{grid-column:span 2}}
+    @media(max-width:760px){.app{display:block}.sidebar{position:static;width:auto;height:auto;padding:13px 14px}.brand{padding:0 0 10px}.brand-mark{display:none}.brand strong{font-size:15px}.brand small{display:none}.profile{display:flex;gap:8px;padding:8px 0 0;margin-top:4px;border-top:0}.profile b,.profile span{display:none}.profile .btn{width:auto;margin-top:0}.nav{display:flex;overflow:auto;padding-top:10px}.nav button{white-space:nowrap;padding:9px 10px;font-size:12px}.nav .ico{display:none}main{padding:20px 13px 50px}.topbar{align-items:stretch}.topbar h1{font-size:22px}.top-actions .btn{padding:8px}.stats{gap:9px}.stat{padding:14px}.stat .number{font-size:24px}.form-grid,.detail-grid{grid-template-columns:1fr}.field.span2,.field.span3{grid-column:span 1}.item-grid{grid-template-columns:2fr 1fr 1fr}.item-grid .price,.item-grid .amount,.item-grid .remove{grid-column:auto}.dialog{padding:16px}.overlay{padding:8px}}
+  </style>
+</head>
+<body>
+<div class="auth-screen hidden" id="authScreen">
+  <div class="auth-card">
+    <div class="brand-mark">฿</div>
+    <div id="loginPanel">
+      <h1>เข้าสู่ระบบฎีกาเบิกจ่าย</h1>
+      <p>กรอกชื่อผู้ใช้และรหัสผ่านที่ผู้ดูแลระบบกำหนด</p>
+      <form id="loginForm">
+        <div class="field"><label for="loginUsername">ชื่อผู้ใช้</label><input id="loginUsername" name="username" autocomplete="username" required></div>
+        <div class="field"><label for="loginPassword">รหัสผ่าน</label><input id="loginPassword" name="password" type="password" autocomplete="current-password" required></div>
+        <div class="auth-error" id="loginError" role="alert"></div>
+        <button class="btn primary" type="submit">เข้าสู่ระบบ</button>
+      </form>
+    </div>
+    <div id="changePasswordPanel" class="hidden">
+      <h1>ตั้งรหัสผ่านใหม่</h1>
+      <p>รหัสเริ่มต้นใช้ได้เฉพาะครั้งแรก กรุณาตั้งรหัสใหม่อย่างน้อย 10 ตัวอักษร</p>
+      <form id="changePasswordForm">
+        <div class="field"><label for="oldPassword">รหัสผ่านเดิม</label><input id="oldPassword" name="oldPassword" type="password" autocomplete="current-password" required></div>
+        <div class="field"><label for="newPassword">รหัสผ่านใหม่</label><input id="newPassword" name="newPassword" type="password" minlength="10" autocomplete="new-password" required></div>
+        <div class="field"><label for="confirmPassword">ยืนยันรหัสผ่านใหม่</label><input id="confirmPassword" name="confirmPassword" type="password" minlength="10" autocomplete="new-password" required></div>
+        <div class="auth-error" id="changeError" role="alert"></div>
+        <button class="btn primary" type="submit">บันทึกรหัสผ่านใหม่</button>
+        <button class="btn" type="button" id="switchAccountBtn">ใช้บัญชีอื่น</button>
+      </form>
+    </div>
+  </div>
+</div>
+<div class="app hidden" id="appRoot">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">฿</div><strong>ระบบฎีกาเบิกจ่าย</strong><small>โรงพยาบาลส่งเสริมสุขภาพตำบลบ้านทับสอ</small></div>
+    <nav class="nav" id="nav">
+      <button data-page="dashboard" class="active"><span class="ico">▦</span>ภาพรวม</button>
+      <button data-page="registry"><span class="ico">☷</span>ทะเบียนฎีกา</button>
+      <button data-page="form" id="navForm"><span class="ico">＋</span>สร้างฎีกา</button>
+      <button data-page="reports" id="navReports"><span class="ico">▤</span>รายงาน</button>
+      <button data-page="budgets" id="navBudgets"><span class="ico">◫</span>งบประมาณ</button>
+      <button data-page="admin" id="navAdmin"><span class="ico">⚙</span>ตั้งค่าระบบ</button>
+      <button data-page="users" id="navUsers"><span class="ico">♙</span>เพิ่มผู้ใช้งาน</button>
+    </nav>
+    <div class="profile"><b id="profileName">กำลังโหลด...</b><span id="profileRole"></span><button class="btn small" id="changePasswordBtn">เปลี่ยนรหัสผ่าน</button><button class="btn small" id="logoutBtn">ออกจากระบบ</button></div>
+  </aside>
+  <main>
+    <header class="topbar"><div><div class="eyebrow">Finance workflow</div><h1 id="pageTitle">ภาพรวมการเบิกจ่าย</h1><p id="pageSubtitle">ติดตามสถานะฎีกาและยอดจ่ายจากข้อมูลล่าสุด</p></div><div class="top-actions"><button class="btn" id="refreshBtn">↻ รีเฟรช</button></div></header>
+    <section id="page-dashboard"></section>
+    <section id="page-registry" class="hidden"></section>
+    <section id="page-form" class="hidden"></section>
+    <section id="page-reports" class="hidden"></section>
+    <section id="page-budgets" class="hidden"></section>
+    <section id="page-admin" class="hidden"></section>
+    <section id="page-users" class="hidden"></section>
+  </main>
+</div>
+<div class="overlay" id="overlay" aria-hidden="true"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="detailTitle"><div id="detailContent"></div></div></div>
+<div class="loading" id="loading"><div class="spinner" aria-label="กำลังโหลด"></div></div>
+<div class="toast" id="toast" role="status"></div>
+<script>
+(function(){
+  'use strict';
+  var WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbx4okQj0yKvo4edkTq8JvQrod4MHFnboi50_lfB3m6WxuGnEVr4NxvIIegJy1yPZi5_/exec';
+  var GAS = typeof google !== 'undefined' && google.script && google.script.run;
+  if (!GAS) {
+    location.replace(WEB_APP_URL);
+    return;
   }
-  var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    sourceId = props.getProperty('SPREADSHEET_ID');
-    if (target.getId() === sourceId) return {spreadsheetUrl:target.getUrl(),alreadyConnected:true};
-    var source = SpreadsheetApp.openById(sourceId);
-    prepareSheets_(target,false);
-    Object.keys(APP_SHEETS).forEach(function(name) {
-      var src = source.getSheetByName(name);
-      var dst = target.getSheetByName(name);
-      if (!src) throw new Error('ไม่พบชีตต้นทาง ' + name);
-      var width = APP_SHEETS[name].length;
-      var sourceCount = Math.max(0,src.getLastRow()-1);
-      var targetCount = Math.max(0,dst.getLastRow()-1);
-      if (targetCount > sourceCount) throw new Error('ชีตปลายทาง ' + name + ' มีข้อมูลมากกว่าต้นทาง');
-      var values = sourceCount ? src.getRange(2,1,sourceCount,width).getValues() : [];
-      var current = targetCount ? dst.getRange(2,1,targetCount,width).getValues() : [];
-      if (JSON.stringify(current) !== JSON.stringify(values.slice(0,targetCount)))
-        throw new Error('ชีตปลายทาง ' + name + ' มีข้อมูลไม่ตรงกับต้นทาง จึงหยุดเพื่อป้องกันข้อมูลทับกัน');
-      if (sourceCount > targetCount)
-        dst.getRange(targetCount+2,1,sourceCount-targetCount,width).setValues(values.slice(targetCount));
-    });
-    SpreadsheetApp.flush();
-    props.setProperties({PREVIOUS_SPREADSHEET_ID:sourceId,SPREADSHEET_ID:target.getId()},false);
-    log_('',{email:owner,role:'ADMIN'},'USE_EXISTING_SPREADSHEET',{from:sourceId,to:target.getId()});
-    Logger.log('ใช้งานชีต: ' + target.getUrl());
-    Logger.log('ชีตเดิมสำรอง: ' + source.getUrl());
-    return {spreadsheetUrl:target.getUrl(),backupUrl:source.getUrl()};
-  } finally {
-    lock.releaseLock();
+  var roles={REQUESTER:'ผู้ขอเบิก',FINANCE:'เจ้าหน้าที่การเงิน',APPROVER:'ผู้อนุมัติ',ADMIN:'ผู้ดูแลระบบ',AUDITOR:'ผู้ตรวจสอบ'};
+  var statuses={DRAFT:'ร่าง',SUBMITTED:'ส่งตรวจ',RETURNED:'ส่งกลับแก้ไข',VERIFIED:'รออนุมัติ',APPROVED:'อนุมัติแล้ว',REJECTED:'ไม่อนุมัติ',PAID:'จ่ายแล้ว',CLOSED:'ปิดฎีกา',CANCELLED:'ยกเลิก'};
+  var titles={dashboard:['ภาพรวมการเบิกจ่าย','ติดตามสถานะฎีกาและยอดจ่ายจากข้อมูลล่าสุด'],registry:['ทะเบียนฎีกา','ค้นหาและเปิดหลักฐานย้อนหลัง'],form:['สร้างฎีกา','บันทึกร่างก่อนแนบเอกสารและส่งตรวจ'],reports:['รายงานทะเบียนฎีกา','กรองข้อมูลและส่งออก CSV'],budgets:['งบประมาณ','ยอดจัดสรร ยอดผูกพัน ยอดจ่าย และยอดคงเหลือ'],admin:['ตั้งค่าระบบ','ข้อมูลหน่วยงาน ประเภทค่าใช้จ่าย และรายการตรวจเอกสาร'],users:['เพิ่มผู้ใช้งาน','สร้างบัญชี กำหนดบทบาท และจัดการผู้ใช้ในระบบ']};
+  var state={page:'dashboard',bootstrap:null,detail:null,editing:null,report:[],busy:0,toastTimer:null,lastError:''};
+  var authToken='';
+  try {authToken=sessionStorage.getItem('finance_auth_token')||''} catch(e) {}
+  var $=function(id){return document.getElementById(id)};
+  function esc(v){return String(v===undefined||v===null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+  function money(v){return Number(v||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
+  function date(v){if(!v)return '—';var d=new Date(String(v).slice(0,10)+'T12:00:00');return isNaN(d)?esc(v):d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric'})}
+  function datetime(v){if(!v)return '—';var d=new Date(String(v).replace(' ','T'));return isNaN(d)?esc(v):d.toLocaleString('th-TH',{dateStyle:'medium',timeStyle:'short'})}
+  function today(){var d=new Date();return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-')}
+  function badge(s){return '<span class="badge '+esc(s)+'">'+esc(statuses[s]||s)+'</span>'}
+  function optionList(items,selected,blank){return (blank?'<option value="">'+esc(blank)+'</option>':'')+(items||[]).map(function(x){return '<option value="'+esc(x)+'"'+(String(x)===String(selected)?' selected':'')+'>'+esc(x)+'</option>'}).join('')}
+  function fundSourceChoices(items,selected){var sources=(items||[]).filter(function(x){return x!=='อื่น ๆ'&&x!=='อื่นๆ...........'&&x!=='__OTHER__'});if(sources.indexOf('เงินอุดหนุน')<0)sources.push('เงินอุดหนุน');var custom=!!selected&&sources.indexOf(selected)<0;return {custom:custom,options:optionList(sources,custom?'':selected)+'<option value="__OTHER__"'+(custom?' selected':'')+'>อื่นๆ...........</option>'}}
+  function toggleCustomFundSource(){var select=$('fundSourceSelect'),field=$('customFundSourceField'),input=$('customFundSource');if(!select||!field||!input)return;var custom=select.value==='__OTHER__';field.classList.toggle('hidden',!custom);input.required=custom;if(custom)input.focus()}
+  function toast(msg,error){var t=$('toast');t.textContent=msg;t.className='toast show'+(error?' error':'');clearTimeout(state.toastTimer);state.toastTimer=setTimeout(function(){t.className='toast'},5000)}
+  function loading(flag){state.busy=Math.max(0,state.busy+(flag?1:-1));$('loading').classList.toggle('show',state.busy>0)}
+  function api(name){var args=[].slice.call(arguments,1);return new Promise(function(resolve,reject){if(!GAS){reject(new Error('ไม่พบการเชื่อมต่อ Apps Script'));return}if(name!=='login')args.unshift(authToken);var runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(function(e){reject(new Error(e&&e.message||String(e)))});runner[name].apply(runner,args)})}
+  async function call(name,args,success){loading(true);try{var result=await api.apply(null,[name].concat(args||[]));state.lastError='';if(success)await success(result);return result}catch(e){state.lastError=e.message||String(e);if(name!=='login'&&state.lastError.indexOf('SESSION_EXPIRED')>=0){clearToken();state.bootstrap=null;closeDetail();showLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่')}else if(state.lastError.indexOf('PASSWORD_CHANGE_REQUIRED')>=0)showChange('กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน');else toast(state.lastError,true);return null}finally{loading(false)}}
+  function storeToken(token){authToken=token;try{sessionStorage.setItem('finance_auth_token',token)}catch(e){}}
+  function clearToken(){authToken='';try{sessionStorage.removeItem('finance_auth_token')}catch(e){}}
+  function showLogin(message){$('appRoot').classList.add('hidden');$('authScreen').classList.remove('hidden');$('loginPanel').classList.remove('hidden');$('changePasswordPanel').classList.add('hidden');$('loginError').textContent=message||'';$('loginPassword').value=''}
+  function showChange(message){$('appRoot').classList.add('hidden');$('authScreen').classList.remove('hidden');$('loginPanel').classList.add('hidden');$('changePasswordPanel').classList.remove('hidden');$('changeError').textContent=message||''}
+  async function submitLogin(){var f=new FormData($('loginForm'));$('loginError').textContent='';var result=await call('login',[f.get('username'),f.get('password')]);if(!result){$('loginError').textContent=state.lastError;return}storeToken(result.token);if(result.user.mustChangePassword){showChange('กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน');return}await refresh()}
+  async function submitPasswordChange(){var f=new FormData($('changePasswordForm'));$('changeError').textContent='';if(f.get('newPassword')!==f.get('confirmPassword')){$('changeError').textContent='รหัสผ่านใหม่ไม่ตรงกัน';return}var result=await call('changePassword',[f.get('oldPassword'),f.get('newPassword')]);if(!result){$('changeError').textContent=state.lastError;return}$('changePasswordForm').reset();await refresh();toast('เปลี่ยนรหัสผ่านแล้ว')}
+  async function signOut(){if(GAS&&authToken){try{await api('logout')}catch(e){}}clearToken();state.bootstrap=null;closeDetail();showLogin('ออกจากระบบแล้ว')}
+  async function refresh(){if(!authToken){showLogin();return}var result=await call('getBootstrap',[],function(data){state.bootstrap=data;render();$('authScreen').classList.add('hidden');$('appRoot').classList.remove('hidden')});if(!result){if(state.lastError.indexOf('PASSWORD_CHANGE_REQUIRED')>=0)showChange('กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน');else if(state.lastError.indexOf('SESSION_EXPIRED')>=0){clearToken();showLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่')}else showLogin(state.lastError)}}
+  function isRole(list){var role=state.bootstrap&&state.bootstrap.user.role;return role==='ADMIN'||list.indexOf(role)>=0}
+  function render(){if(!state.bootstrap)return;var b=state.bootstrap;$('profileName').textContent=b.user.name;$('profileRole').textContent=roles[b.user.role]+' · '+(b.user.username||b.user.email);$('navForm').classList.toggle('hidden',!isRole(['REQUESTER','FINANCE']));$('navReports').classList.toggle('hidden',!isRole(['FINANCE','APPROVER','AUDITOR']));$('navBudgets').classList.toggle('hidden',!isRole(['FINANCE','APPROVER','AUDITOR']));$('navAdmin').classList.toggle('hidden',b.user.role!=='ADMIN');$('navUsers').classList.toggle('hidden',b.user.role!=='ADMIN');renderDashboard();renderRegistry();renderForm();renderReports();renderBudgets();renderAdmin();renderUsers();navigate(state.page)}
+  function navigate(page){if(!titles[page])page='dashboard';if((['admin','users'].indexOf(page)>=0&&!isRole([]))||(page==='form'&&!isRole(['REQUESTER','FINANCE']))||(['reports','budgets'].indexOf(page)>=0&&!isRole(['FINANCE','APPROVER','AUDITOR'])))page='dashboard';state.page=page;Object.keys(titles).forEach(function(k){$('page-'+k).classList.toggle('hidden',k!==page)});Array.from($('nav').querySelectorAll('[data-page]')).forEach(function(x){x.classList.toggle('active',x.dataset.page===page)});$('pageTitle').textContent=titles[page][0];$('pageSubtitle').textContent=titles[page][1]}
+  function tableRequestRows(list){if(!list.length)return '<div class="empty">ยังไม่มีฎีกาในรายการนี้</div>';return '<div class="table-wrap"><table class="table"><thead><tr><th>เลขฎีกา</th><th>วันที่</th><th>ผู้ขอเบิก</th><th>ประเภท</th><th>แหล่งเงิน</th><th class="right">ยอดเบิก</th><th>สถานะ</th></tr></thead><tbody>'+list.map(function(r){return '<tr class="clickable" data-open="'+esc(r.id)+'"><td><b>'+esc(r.number||'ร่างยังไม่ออกเลข')+'</b></td><td>'+date(r.requestDate)+'</td><td>'+esc(r.requesterName)+'</td><td>'+esc(r.requestType)+'</td><td>'+esc(r.fundSource)+'</td><td class="right">'+money(r.total)+'</td><td>'+badge(r.status)+'</td></tr>'}).join('')+'</tbody></table></div>'}
+  function renderDashboard(){
+    var b=state.bootstrap, counts=b.dashboard.counts||{}, month=b.dashboard.paidByMonth||{};
+    var keys=Object.keys(month).sort().slice(-6), max=Math.max(1,...keys.map(function(k){return month[k]}));
+    var source=b.dashboard.bySource||{}, sourceKeys=Object.keys(source);
+    var sourceMax=Math.max(1,...sourceKeys.map(function(k){return source[k]}));
+    var cards=[
+      ['ร่างอยู่',counts.DRAFT||0,'บันทึกไว้ ยังไม่ส่งตรวจ'],
+      ['ส่งตรวจ',counts.SUBMITTED||0,'รอเจ้าหน้าที่การเงิน'],
+      ['ส่งกลับแก้ไข',counts.RETURNED||0,'รอผู้ขอปรับเอกสาร'],
+      ['รออนุมัติ',counts.VERIFIED||0,'ผ่านการตรวจแล้ว'],
+      ['อนุมัติแล้ว',counts.APPROVED||0,'รอบันทึกจ่าย / จ่ายบางส่วน'],
+      ['จ่ายแล้ว / ปิดฎีกา',(counts.PAID||0)+(counts.CLOSED||0),'ชำระครบแล้ว']
+    ];
+    $('page-dashboard').innerHTML='<div class="grid stats">'+cards.map(function(c){
+      return '<div class="stat"><div class="label">'+c[0]+'</div><div class="number">'+c[1]+'</div><div class="sub">'+c[2]+'</div></div>';
+    }).join('')+'</div><div class="grid two"><div class="card"><div class="card-head"><h2>ฎีกาล่าสุด</h2><button class="btn small" data-page="registry">ดูทั้งหมด</button></div>'+
+      tableRequestRows(b.requests.slice(0,8))+'</div><div class="card"><h2>ยอดจ่ายรายเดือน</h2><p class="section-note">แสดงตามวันที่บันทึกการจ่ายจริง</p>'+
+      (keys.length?keys.map(function(k){return '<div class="bar-row"><span>'+esc(k.slice(5))+'/'+esc(k.slice(0,4))+'</span><div class="bar-track"><div class="bar-fill" style="width:'+Math.max(2,Math.round(month[k]/max*100))+'%"></div></div><b class="right">'+money(month[k])+'</b></div>'}).join(''):'<div class="empty">ยังไม่มีข้อมูลการจ่าย</div>')+
+      '</div></div><div class="card"><h2>ยอดขอเบิกตามแหล่งเงิน</h2><p class="section-note">ไม่รวมรายการไม่อนุมัติและยกเลิก</p>'+
+      (sourceKeys.length?sourceKeys.map(function(k){return '<div class="bar-row" style="grid-template-columns:140px 1fr 110px"><span>'+esc(k)+'</span><div class="bar-track"><div class="bar-fill" style="width:'+Math.max(2,Math.round(source[k]/sourceMax*100))+'%"></div></div><b class="right">'+money(source[k])+'</b></div>'}).join(''):'<div class="empty">ยังไม่มีข้อมูลยอดเบิก</div>')+'</div>';
   }
-}
-
-/** Setup implementation. The public entry point checks owner identity below. */
-function setupSystem_() {
-  var props = PropertiesService.getScriptProperties();
-  if (props.getProperty('SPREADSHEET_ID')) throw new Error('ตั้งค่าระบบแล้ว กรุณาใช้ฐานข้อมูลเดิม');
-  var owner = setupOwner_();
-  var ss = selectedSpreadsheet_();
-  var created = !ss;
-  if (created) {
-    ss = SpreadsheetApp.create('ทะเบียนฎีกาเบิกจ่าย รพ.สต.บ้านทับสอ');
-    ss.setSpreadsheetTimeZone(APP_TZ);
-  }
-  prepareSheets_(ss,created);
-  Object.keys(APP_SHEETS).forEach(function(name) {
-    if (ss.getSheetByName(name).getLastRow() > 1) throw new Error('ชีต ' + name + ' มีข้อมูลอยู่แล้ว');
-  });
-  var folder = DriveApp.createFolder('เอกสารแนบฎีกา รพ.สต.บ้านทับสอ');
-  if (folder.getSharingAccess() !== DriveApp.Access.PRIVATE) throw new Error('โฟลเดอร์เอกสารต้องเป็นส่วนตัว');
-  props.setProperties({SPREADSHEET_ID: ss.getId(), FOLDER_ID: folder.getId()}, false);
-  append_('Users', {email:owner,name:'ผู้ดูแลระบบ',role:'ADMIN',active:true,createdAt:now_(),updatedAt:now_()});
-  append_('Settings', {key:'config',valueJson:JSON.stringify(defaultSettings_()),updatedAt:now_(),updatedBy:owner});
-  initializeLogin_();
-  Logger.log('Spreadsheet: ' + ss.getUrl());
-  Logger.log('Drive folder: ' + folder.getUrl());
-  return {spreadsheetUrl:ss.getUrl(),folderUrl:folder.getUrl()};
-}
-
-function setupOwner_() {
-  var owner = String(Session.getEffectiveUser().getEmail() || '').trim().toLowerCase();
-  var active = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
-  if (!owner || !active || owner !== active) throw new Error('ให้เจ้าของสคริปต์รันฟังก์ชันตั้งค่าจาก Apps Script editor');
-  return owner;
-}
-
-function selectedSpreadsheet_() {
-  var id = String(TARGET_SPREADSHEET_ID || '').trim();
-  return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
-}
-
-function prepareSheets_(ss,reuseBlankFirst) {
-  var names = Object.keys(APP_SHEETS);
-  names.forEach(function(name) {
-    var sh = ss.getSheetByName(name);
-    if (!sh) return;
-    if (sh.getLastRow() === 0) return;
-    var actual = sh.getRange(1,1,1,APP_SHEETS[name].length).getValues()[0];
-    if (name==='Users' && JSON.stringify(actual.slice(0,6))===JSON.stringify(APP_SHEETS.Users.slice(0,6))) {
-      sh.getRange(1,7,1,APP_SHEETS.Users.length-6).setValues([APP_SHEETS.Users.slice(6)]);
-      return;
-    }
-    if (JSON.stringify(actual) !== JSON.stringify(APP_SHEETS[name]))
-      throw new Error('ชีตชื่อ ' + name + ' มีหัวตารางไม่ตรงกับระบบ กรุณาใช้ชีตปลายทางอื่น');
-  });
-  names.forEach(function(name,index) {
-    var sh = ss.getSheetByName(name);
-    if (!sh) {
-      sh = reuseBlankFirst && index===0 ? ss.getSheets()[0] : ss.insertSheet();
-      sh.setName(name);
-    }
-    if (sh.getLastRow()===0) {
-      sh.getRange(1,1,1,APP_SHEETS[name].length).setValues([APP_SHEETS[name]]);
-      sh.setFrozenRows(1);
-      sh.getRange(1,1,1,APP_SHEETS[name].length).setFontWeight('bold').setBackground('#e6edf5');
-    }
-  });
-}
-
-/** Run once after upgrading an existing installation. It never resets Boss's password. */
-function setupLogin() {
-  setupOwner_();
-  if (!PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID'))
-    throw new Error('กรุณารัน setupSystem ก่อน');
-  return locked_(function() {return initializeLogin_();});
-}
-
-function initializeLogin_() {
-  var owner = setupOwner_();
-  var sh = sheet_('Users');
-  var first = sh.getRange(1,1,1,6).getValues()[0];
-  if (JSON.stringify(first)!==JSON.stringify(APP_SHEETS.Users.slice(0,6)))
-    throw new Error('หัวตาราง Users ไม่ถูกต้อง');
-  sh.getRange(1,7,1,APP_SHEETS.Users.length-6).setValues([APP_SHEETS.Users.slice(6)]);
-  var props = PropertiesService.getScriptProperties();
-  if (!props.getProperty('AUTH_PEPPER')) props.setProperty('AUTH_PEPPER',randomSecret_());
-  var boss = getAll_('Users').filter(function(x){return String(x.username).toLowerCase()==='boss';})[0];
-  if (boss && boss.passwordHash) return {username:'Boss',alreadyConfigured:true};
-  var salt = randomSecret_();
-  var values = {name:'Boss',role:'ADMIN',active:true,username:'Boss',passwordSalt:salt,
-    passwordHash:passwordHash_('05446',salt),mustChangePassword:true,
-    failedAttempts:0,lockedUntilMs:0,authVersion:1,updatedAt:now_()};
-  if (boss) patch_(boss,values);
-  else {
-    var oldAdmin = findBy_('Users','email',owner);
-    if (oldAdmin && !oldAdmin.username) patch_(oldAdmin,values);
-    else append_('Users',Object.assign({email:oldAdmin?'login:boss':owner,createdAt:now_()},values));
-  }
-  Logger.log('สร้างบัญชี Boss แล้ว: เข้าสู่ระบบด้วยรหัสเริ่มต้นและเปลี่ยนรหัสทันที');
-  return {username:'Boss',alreadyConfigured:false};
-}
-
-function login(username,password) {
-  username = String(username||'').trim();
-  password = String(password||'');
-  if (!PropertiesService.getScriptProperties().getProperty('AUTH_PEPPER'))
-    throw new Error('ยังไม่ได้ตั้งค่า Login ให้เจ้าของสคริปต์รัน setupLogin');
-  if (!/^[A-Za-z0-9._-]{3,32}$/.test(username) || !password || password.length>128)
-    throw new Error('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
-  var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    var user = getAll_('Users').filter(function(x){return String(x.username).toLowerCase()===username.toLowerCase();})[0];
-    if (!user || !truthy_(user.active) || !user.passwordHash)
-      throw new Error('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
-    var currentMs = Date.now();
-    if (Number(user.lockedUntilMs||0)>currentMs)
-      throw new Error('บัญชีถูกพักชั่วคราว กรุณาลองอีกครั้งภายหลัง');
-    if (!constantTimeEquals_(String(user.passwordHash),passwordHash_(password,String(user.passwordSalt)))) {
-      var failures = Number(user.failedAttempts||0)+1;
-      patch_(user,{failedAttempts:failures>=LOGIN_MAX_FAILURES?0:failures,
-        lockedUntilMs:failures>=LOGIN_MAX_FAILURES?currentMs+LOGIN_LOCK_MS:0});
-      throw new Error('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
-    }
-    patch_(user,{failedAttempts:0,lockedUntilMs:0});
-    var token = randomSecret_();
-    CacheService.getScriptCache().put('AUTH_'+tokenHash_(token),
-      String(user.username)+'|'+String(Number(user.authVersion)||1),SESSION_SECONDS);
-    log_('',user,'LOGIN',{username:user.username});
-    return {token:token,user:publicUser_(user)};
-  } finally {
-    SpreadsheetApp.flush();
-    lock.releaseLock();
-  }
-}
-
-function logout(token) {
-  if (typeof token==='string' && token.length<200)
-    CacheService.getScriptCache().remove('AUTH_'+tokenHash_(token));
-  return true;
-}
-
-function changePassword(token,oldPassword,newPassword) {
-  return locked_(function() {
-    var user = currentUser_(token,true);
-    oldPassword = String(oldPassword||'');
-    newPassword = String(newPassword||'');
-    if (!constantTimeEquals_(String(user.passwordHash),passwordHash_(oldPassword,String(user.passwordSalt))))
-      throw new Error('รหัสผ่านเดิมไม่ถูกต้อง');
-    validateNewPassword_(newPassword,user.username);
-    if (newPassword===oldPassword) throw new Error('รหัสผ่านใหม่ต้องต่างจากเดิม');
-    var salt = randomSecret_(),version=Number(user.authVersion||1)+1;
-    patch_(user,{passwordSalt:salt,passwordHash:passwordHash_(newPassword,salt),
-      mustChangePassword:false,authVersion:version,failedAttempts:0,lockedUntilMs:0,updatedAt:now_()});
-    CacheService.getScriptCache().put('AUTH_'+tokenHash_(token),String(user.username)+'|'+version,SESSION_SECONDS);
-    log_('',user,'CHANGE_PASSWORD',{username:user.username});
-    return {user:publicUser_(Object.assign({},user,{mustChangePassword:false,authVersion:version}))};
-  });
-}
-
-function getBootstrap(token) {
-  var user = currentUser_(token);
-  var settings = settings_();
-  var requests = visibleRequests_(user);
-  var privileged = hasRole_(user, ['FINANCE','APPROVER','ADMIN','AUDITOR']);
-  return {
-    user: publicUser_(user), settings:settings, requests:requests,
-    dashboard: dashboard_(requests), budgets:privileged ? budgetOverview_() : [],
-    users:user.role === 'ADMIN' ? getAll_('Users').map(publicUser_) : []
-  };
-}
-
-function getRequest(token,id) {
-  var user = currentUser_(token);
-  var request = findBy_('Requests','id',id);
-  if (!request) throw new Error('ไม่พบฎีกา');
-  canRead_(user,request);
-  var items = getAll_('RequestItems').filter(function(x){return x.requestId === id && truthy_(x.active);});
-  var attachments = getAll_('Attachments').filter(function(x){return x.requestId === id && truthy_(x.active);}).map(function(x) {
-    return {id:x.id,requestId:x.requestId,docType:x.docType,fileName:x.fileName,mimeType:x.mimeType,size:Number(x.size),uploadedBy:x.uploadedBy,uploadedAt:x.uploadedAt};
-  });
-  var payments = getAll_('Payments').filter(function(x){return x.requestId === id;});
-  var approvals = getAll_('ApprovalsLog').filter(function(x){return x.requestId === id;});
-  var audit = getAll_('AuditLog').filter(function(x){return x.requestId === id;}).map(function(x) {
-    return {action:x.action,actorEmail:x.actorEmail,actorRole:x.actorRole,details:x.detailsJson,at:x.at};
-  });
-  return {request:cleanRow_(request),items:items.map(cleanRow_),attachments:attachments,payments:payments.map(cleanRow_),approvals:approvals.map(cleanRow_),audit:audit};
-}
-
-function saveRequest(token,data) {
-  return locked_(function() {
-    var user = currentUser_(token);
-    requireRole_(user,['REQUESTER','FINANCE','ADMIN']);
-    data = data || {};
-    var settings = settings_();
-    var normalized = normalizeRequest_(data,settings);
-    var existing = data.id ? findBy_('Requests','id',String(data.id)) : null;
-    if (data.id && !existing) throw new Error('ไม่พบฎีกาที่ต้องการแก้ไข');
-    var at = now_();
-    var id;
-    if (existing) {
-      canEdit_(user,existing);
-      assertVersion_(existing,data.version);
-      if (existing.number && Number(existing.fiscalYear) !== fiscalYear_(normalized.requestDate))
-        throw new Error('ฎีกาที่ออกเลขแล้วเปลี่ยนวันที่ข้ามปีงบประมาณไม่ได้');
-      id = existing.id;
-      var change = {version:Number(existing.version)+1,updatedAt:at,requestDate:normalized.requestDate,
-        fiscalYear:fiscalYear_(normalized.requestDate),
-        requesterName:normalized.requesterName,unit:normalized.unit,requestType:normalized.requestType,
-        category:normalized.category,fundSource:normalized.fundSource,project:normalized.project,
-        payeeName:normalized.payeeName,payeeAddress:normalized.payeeAddress,memo:normalized.memo,total:normalized.total};
-      patch_(existing,change);
-      getAll_('RequestItems').filter(function(x){return x.requestId === id && truthy_(x.active);}).forEach(function(x){patch_(x,{active:false});});
-      log_(id,user,'EDIT',{before:requestSnapshot_(existing),after:change});
-    } else {
-      id = Utilities.getUuid();
-      append_('Requests',{id:id,number:'',version:1,fiscalYear:fiscalYear_(normalized.requestDate),
-        requestDate:normalized.requestDate,createdAt:at,updatedAt:at,requesterEmail:user.email,
-        requesterName:normalized.requesterName,unit:normalized.unit,requestType:normalized.requestType,
-        category:normalized.category,fundSource:normalized.fundSource,project:normalized.project,
-        payeeName:normalized.payeeName,payeeAddress:normalized.payeeAddress,memo:normalized.memo,
-        total:normalized.total,status:'DRAFT',reviewerNote:'',approverNote:'',cancelledReason:''});
-      log_(id,user,'CREATE',{total:normalized.total});
-    }
-    normalized.items.forEach(function(item) {
-      append_('RequestItems',{id:Utilities.getUuid(),requestId:id,version:existing ? Number(existing.version)+1 : 1,
-        description:item.description,quantity:item.quantity,unit:item.unit,unitPrice:item.unitPrice,
-        amount:item.amount,active:true,createdAt:at});
-    });
-    if (normalized.addFundSource) {
-      settings.fundSources.push(normalized.fundSource);
-      patch_(findBy_('Settings','key','config'),
-        {valueJson:JSON.stringify(settings),updatedAt:at,updatedBy:user.email});
-      log_('',user,'ADD_FUND_SOURCE',{fundSource:normalized.fundSource});
-    }
-    return getRequest(token,id);
-  });
-}
-
-function submitRequest(token,id,version) {
-  return locked_(function() {
-    var user = currentUser_(token);
-    var r = mustRequest_(id);
-    canEdit_(user,r);
-    assertVersion_(r,version);
-    var check = settings_().checklists[r.requestType] || [];
-    var uploaded = getAll_('Attachments').filter(function(x){return x.requestId === id && truthy_(x.active);})
-      .map(function(x){return x.docType;});
-    var missing = check.filter(function(x){return uploaded.indexOf(x) < 0;});
-    if (missing.length) throw new Error('ยังขาดเอกสาร: ' + missing.join(', '));
-    var items = getAll_('RequestItems').filter(function(x){return x.requestId === id && truthy_(x.active);});
-    if (!items.length || Number(r.total) <= 0) throw new Error('กรุณาระบุรายการค่าใช้จ่าย');
-    var number = r.number || nextNumber_(r.requestDate);
-    patch_(r,{number:number,fiscalYear:fiscalYear_(r.requestDate),status:'SUBMITTED',updatedAt:now_(),version:Number(r.version)+1});
-    approvalLog_(id,user,'SUBMISSION','SUBMIT','ส่งตรวจ');
-    log_(id,user,'SUBMIT',{number:number});
-    return getRequest(token,id);
-  });
-}
-
-function financeReview(token,id,version,decision,comment) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['FINANCE','ADMIN']);
-    var r = mustRequest_(id); assertVersion_(r,version);
-    if (r.status !== 'SUBMITTED') throw new Error('ฎีกาไม่ได้อยู่ในขั้นส่งตรวจ');
-    decision = String(decision || '');
-    if (decision !== 'PASS' && decision !== 'RETURN') throw new Error('ผลตรวจไม่ถูกต้อง');
-    comment = shortText_(comment,1000);
-    if (decision === 'RETURN' && !comment) throw new Error('กรุณาระบุเหตุผลที่ส่งกลับแก้ไข');
-    var status = decision === 'PASS' ? 'VERIFIED' : 'RETURNED';
-    patch_(r,{status:status,reviewerNote:comment,version:Number(r.version)+1,updatedAt:now_()});
-    approvalLog_(id,user,'FINANCE',decision,comment);
-    log_(id,user,'FINANCE_' + decision,{comment:comment});
-    return getRequest(token,id);
-  });
-}
-
-function decideApproval(token,id,version,decision,comment) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['APPROVER','ADMIN']);
-    var r = mustRequest_(id); assertVersion_(r,version);
-    if (r.status !== 'VERIFIED') throw new Error('ฎีกาไม่ได้อยู่ในขั้นรออนุมัติ');
-    decision = String(decision || '');
-    if (decision !== 'APPROVE' && decision !== 'REJECT') throw new Error('ผลอนุมัติไม่ถูกต้อง');
-    comment = shortText_(comment,1000);
-    if (decision === 'REJECT' && !comment) throw new Error('กรุณาระบุเหตุผลที่ไม่อนุมัติ');
-    if (decision === 'APPROVE') assertBudgetAvailable_(r);
-    var status = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
-    patch_(r,{status:status,approverNote:comment,version:Number(r.version)+1,updatedAt:now_()});
-    approvalLog_(id,user,'APPROVAL',decision,comment);
-    log_(id,user,decision,{comment:comment});
-    return getRequest(token,id);
-  });
-}
-
-function recordPayment(token,id,version,payment) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['FINANCE','ADMIN']);
-    var r = mustRequest_(id); assertVersion_(r,version);
-    if (r.status !== 'APPROVED') throw new Error('บันทึกจ่ายได้เฉพาะฎีกาที่อนุมัติแล้วและยังมียอดค้าง');
-    payment = payment || {};
-    var date = isoDate_(payment.paymentDate);
-    var method = shortText_(payment.method,80);
-    var reference = shortText_(payment.reference,120);
-    var amount = money_(payment.amount);
-    if (!method || !reference || amount <= 0) throw new Error('กรุณาระบุวิธีจ่าย เลขอ้างอิง และยอดจ่าย');
-    var paid = sumPayments_(id);
-    if (amount > Number(r.total) - paid + 0.001) throw new Error('ยอดจ่ายเกินยอดที่อนุมัติ');
-    var duplicate = getAll_('Payments').some(function(x){return x.requestId === id && x.reference === reference;});
-    if (duplicate) throw new Error('เลขอ้างอิงการจ่ายซ้ำในฎีกานี้');
-    append_('Payments',{id:Utilities.getUuid(),requestId:id,paymentDate:date,method:method,reference:reference,
-      amount:amount,actorEmail:user.email,at:now_()});
-    var complete = Math.abs(Number(r.total) - paid - amount) < 0.001;
-    patch_(r,{status:complete ? 'PAID' : 'APPROVED',version:Number(r.version)+1,updatedAt:now_()});
-    log_(id,user,'PAY',{date:date,method:method,reference:reference,amount:amount});
-    return getRequest(token,id);
-  });
-}
-
-function closeRequest(token,id,version) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['FINANCE','ADMIN']);
-    var r = mustRequest_(id); assertVersion_(r,version);
-    if (r.status !== 'PAID') throw new Error('ปิดฎีกาได้หลังจ่ายครบเท่านั้น');
-    patch_(r,{status:'CLOSED',version:Number(r.version)+1,updatedAt:now_()});
-    log_(id,user,'CLOSE',{});
-    return getRequest(token,id);
-  });
-}
-
-function cancelRequest(token,id,version,reason) {
-  return locked_(function() {
-    var user = currentUser_(token);
-    var r = mustRequest_(id); assertVersion_(r,version);
-    reason = shortText_(reason,1000);
-    if (!reason) throw new Error('กรุณาระบุเหตุผลยกเลิก');
-    if (sumPayments_(id) > 0) throw new Error('ฎีกาที่จ่ายแล้วไม่สามารถยกเลิกได้');
-    var ownEarly = r.requesterEmail === user.email && ['DRAFT','RETURNED','SUBMITTED'].indexOf(r.status) >= 0;
-    var officer = hasRole_(user,['FINANCE','ADMIN']) && ['DRAFT','RETURNED','SUBMITTED','VERIFIED','APPROVED','REJECTED'].indexOf(r.status) >= 0;
-    if (!ownEarly && !officer) throw new Error('ไม่มีสิทธิ์ยกเลิกฎีกาสถานะนี้');
-    patch_(r,{status:'CANCELLED',cancelledReason:reason,version:Number(r.version)+1,updatedAt:now_()});
-    log_(id,user,'CANCEL',{reason:reason});
-    return getRequest(token,id);
-  });
-}
-
-function uploadAttachment(token,id,version,docType,fileName,mimeType,base64) {
-  return locked_(function() {
-    var user = currentUser_(token);
-    var r = mustRequest_(id); canEdit_(user,r); assertVersion_(r,version);
-    docType = shortText_(docType,120);
-    fileName = shortText_(fileName,180).replace(/[\\\/:*?"<>|]/g,'_');
-    mimeType = String(mimeType || '');
-    if (!docType || !fileName) throw new Error('กรุณาระบุประเภทเอกสารและชื่อไฟล์');
-    if (['application/pdf','image/jpeg','image/png'].indexOf(mimeType) < 0) throw new Error('รับเฉพาะ PDF, JPG และ PNG');
-    if (typeof base64 !== 'string' || base64.length > 11200000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error('ข้อมูลไฟล์ไม่ถูกต้องหรือไฟล์ใหญ่เกิน 8 MB');
-    var bytes = Utilities.base64Decode(base64);
-    if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw new Error('ไฟล์ต้องมีขนาดไม่เกิน 8 MB');
-    var signature = bytes.slice(0,8).map(function(b){return (b+256)%256;});
-    var pdf = signature[0]===37 && signature[1]===80 && signature[2]===68 && signature[3]===70;
-    var jpg = signature[0]===255 && signature[1]===216 && signature[2]===255;
-    var png = signature.slice(0,4).join(',') === '137,80,78,71';
-    if (!(mimeType==='application/pdf'&&pdf || mimeType==='image/jpeg'&&jpg || mimeType==='image/png'&&png)) throw new Error('ชนิดไฟล์ไม่ตรงกับเนื้อหา');
-    var folderId = PropertiesService.getScriptProperties().getProperty('FOLDER_ID');
-    var folder = DriveApp.getFolderById(folderId);
-    if (folder.getSharingAccess() !== DriveApp.Access.PRIVATE) throw new Error('โฟลเดอร์เอกสารถูกเปลี่ยนสิทธิ์ กรุณาให้ผู้ดูแลตรวจสอบ');
-    var file = folder.createFile(Utilities.newBlob(bytes,mimeType,fileName));
-    var aid = Utilities.getUuid();
-    append_('Attachments',{id:aid,requestId:id,docType:docType,fileId:file.getId(),fileName:fileName,
-      mimeType:mimeType,size:bytes.length,uploadedBy:user.email,uploadedAt:now_(),active:true});
-    patch_(r,{version:Number(r.version)+1,updatedAt:now_()});
-    log_(id,user,'ATTACH',{attachmentId:aid,docType:docType,fileName:fileName});
-    return getRequest(token,id);
-  });
-}
-
-function removeAttachment(token,id,version,attachmentId) {
-  return locked_(function() {
-    var user = currentUser_(token);
-    var r = mustRequest_(id); canEdit_(user,r); assertVersion_(r,version);
-    var a = findBy_('Attachments','id',attachmentId);
-    if (!a || a.requestId !== id || !truthy_(a.active)) throw new Error('ไม่พบไฟล์แนบ');
-    patch_(a,{active:false});
-    patch_(r,{version:Number(r.version)+1,updatedAt:now_()});
-    log_(id,user,'REMOVE_ATTACHMENT',{attachmentId:attachmentId,fileName:a.fileName});
-    return getRequest(token,id);
-  });
-}
-
-function downloadAttachment(token,attachmentId) {
-  var user = currentUser_(token);
-  var a = findBy_('Attachments','id',attachmentId);
-  if (!a || !truthy_(a.active)) throw new Error('ไม่พบไฟล์แนบ');
-  canRead_(user,mustRequest_(a.requestId));
-  var blob = DriveApp.getFileById(a.fileId).getBlob();
-  if (blob.getBytes().length > MAX_ATTACHMENT_BYTES) throw new Error('ไฟล์ใหญ่เกินขนาดที่เปิดผ่านระบบ');
-  return {fileName:a.fileName,mimeType:a.mimeType,base64:Utilities.base64Encode(blob.getBytes())};
-}
-
-function saveBudget(token,data) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['ADMIN']);
-    data = data || {};
-    var year = Number(data.fiscalYear);
-    var settings = settings_();
-    var source = shortText_(data.fundSource,120);
-    var category = shortText_(data.category,120);
-    var allocated = money_(data.allocated);
-    if (!Number.isInteger(year) || year < 2500 || year > 2700 || settings.fundSources.indexOf(source)<0 || settings.categories.indexOf(category)<0 || allocated < 0)
-      throw new Error('ข้อมูลงบประมาณไม่ถูกต้อง');
-    var existing = getAll_('Budgets').filter(function(x){return Number(x.fiscalYear)===year && x.fundSource===source && x.category===category;})[0];
-    var used = budgetUsed_(year,source,category);
-    if (allocated + 0.001 < used.committed + used.paid) throw new Error('ยอดจัดสรรต่ำกว่ายอดผูกพันและจ่ายแล้ว');
-    if (existing) patch_(existing,{allocated:allocated,updatedAt:now_(),updatedBy:user.email});
-    else append_('Budgets',{id:Utilities.getUuid(),fiscalYear:year,fundSource:source,category:category,allocated:allocated,updatedAt:now_(),updatedBy:user.email});
-    log_('',user,'SAVE_BUDGET',{fiscalYear:year,fundSource:source,category:category,allocated:allocated});
-    return budgetOverview_();
-  });
-}
-
-function saveSettings(token,data) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['ADMIN']);
-    var normalized = normalizeSettings_(data);
-    getAll_('Requests').filter(function(r){return ['DRAFT','RETURNED','SUBMITTED','VERIFIED','APPROVED'].indexOf(r.status)>=0;}).forEach(function(r) {
-      if (normalized.requestTypes.indexOf(r.requestType)<0 || normalized.categories.indexOf(r.category)<0 || normalized.fundSources.indexOf(r.fundSource)<0)
-        throw new Error('ยังมีฎีกาที่ใช้ประเภท หมวด หรือแหล่งเงินที่ต้องการลบ');
-    });
-    getAll_('Budgets').forEach(function(b) {
-      if (normalized.categories.indexOf(b.category)<0 || normalized.fundSources.indexOf(b.fundSource)<0)
-        throw new Error('ยังมีงบประมาณที่ใช้หมวดหรือแหล่งเงินที่ต้องการลบ');
-    });
-    var row = findBy_('Settings','key','config');
-    patch_(row,{valueJson:JSON.stringify(normalized),updatedAt:now_(),updatedBy:user.email});
-    log_('',user,'SAVE_SETTINGS',{settings:normalized});
-    return normalized;
-  });
-}
-
-function saveUser(token,data) {
-  return locked_(function() {
-    var user = currentUser_(token); requireRole_(user,['ADMIN']);
-    data = data || {};
-    var username = String(data.username || '').trim();
-    var emailInput = String(data.email || '').trim().toLowerCase();
-    var name = shortText_(data.name,120);
-    var role = String(data.role || '');
-    var active = data.active === true;
-    var password = String(data.password || '');
-    if (!/^[A-Za-z0-9._-]{3,32}$/.test(username) || !name || APP_ROLES.indexOf(role)<0 ||
-        (emailInput && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput)))
-      throw new Error('ข้อมูลผู้ใช้ไม่ถูกต้อง');
-    var all = getAll_('Users');
-    var existing = all.filter(function(x){return String(x.username).toLowerCase()===username.toLowerCase();})[0];
-    if (!existing && emailInput) existing = all.filter(function(x){return x.email===emailInput && !x.username;})[0];
-    var email = emailInput || (existing && existing.email) || 'login:'+username.toLowerCase();
-    if (all.some(function(x){return x.email===email && (!existing || x._row!==existing._row);}))
-      throw new Error('อีเมลนี้ถูกใช้โดยบัญชีอื่นแล้ว');
-    if (existing && existing.role === 'ADMIN' && truthy_(existing.active) && (!active || role !== 'ADMIN')) {
-      var admins = all.filter(function(x){return x.role==='ADMIN' && truthy_(x.active);});
-      if (admins.length <= 1) throw new Error('ต้องมีผู้ดูแลระบบที่ใช้งานได้อย่างน้อยหนึ่งคน');
-    }
-    if (!existing && !password) throw new Error('กรุณาตั้งรหัสผ่านเริ่มต้นให้ผู้ใช้ใหม่');
-    var changes = {email:email,name:name,role:role,active:active,username:username,updatedAt:now_()};
-    var version = Number(existing && existing.authVersion || 1);
-    if (password) {
-      validateNewPassword_(password,username);
-      var salt = randomSecret_();
-      changes.passwordSalt = salt;
-      changes.passwordHash = passwordHash_(password,salt);
-      changes.mustChangePassword = true;
-      changes.failedAttempts = 0;
-      changes.lockedUntilMs = 0;
-      version += 1;
-    } else if (existing && (existing.role!==role || truthy_(existing.active)!==active)) version += 1;
-    changes.authVersion = version;
-    if (existing) patch_(existing,changes);
-    else append_('Users',Object.assign({createdAt:now_()},changes));
-    log_('',user,'SAVE_USER',{username:username,email:email,role:role,active:active,passwordReset:!!password});
-    return getAll_('Users').map(publicUser_);
-  });
-}
-
-function getReport(token,filters) {
-  var user = currentUser_(token);
-  requireRole_(user,['FINANCE','APPROVER','ADMIN','AUDITOR']);
-  filters = filters || {};
-  var rows = getAll_('Requests');
-  if (filters.fiscalYear) rows = rows.filter(function(x){return Number(x.fiscalYear)===Number(filters.fiscalYear);});
-  if (filters.fundSource) rows = rows.filter(function(x){return x.fundSource===filters.fundSource;});
-  if (filters.category) rows = rows.filter(function(x){return x.category===filters.category;});
-  if (filters.status) rows = rows.filter(function(x){return x.status===filters.status;});
-  var payments = getAll_('Payments');
-  return rows.map(function(r) {
-    var paid = payments.filter(function(p){return p.requestId===r.id;}).reduce(function(a,p){return a+Number(p.amount);},0);
-    var payable = ['APPROVED','PAID','CLOSED'].indexOf(r.status) >= 0;
-    return {id:r.id,number:r.number,requestDate:r.requestDate,fiscalYear:Number(r.fiscalYear),
-      requesterName:r.requesterName,requestType:r.requestType,category:r.category,fundSource:r.fundSource,
-      payeeName:r.payeeName,total:Number(r.total),paid:round2_(paid),outstanding:payable ? round2_(Math.max(0,Number(r.total)-paid)) : 0,
-      status:r.status,updatedAt:r.updatedAt};
-  });
-}
-
-function defaultSettings_() {
-  return {
-    organization:'โรงพยาบาลส่งเสริมสุขภาพตำบลบ้านทับสอ',
-    affiliation:'องค์การบริหารส่วนจังหวัดสกลนคร กองสาธารณสุข',
-    address:'ตำบลงิ้วด่อน อำเภอเมือง จังหวัดสกลนคร',
-    numberPrefix:'ฎก',
-    requestTypes:['จ้างเหมาบริการ (CG)','จัดซื้อ/จัดจ้าง','ค่าเดินทาง','ค่าใช้จ่ายอื่น'],
-    categories:['ค่าจ้างเหมา','ค่าวัสดุ','ค่าใช้สอย','ค่าเดินทาง','อื่น ๆ'],
-    fundSources:['เงินบำรุง','งบประมาณ อบจ.','เงินกองทุน','เงินอุดหนุน','อื่น ๆ'],
-    checklists:{
-      'จ้างเหมาบริการ (CG)':['ใบส่งมอบงาน','ใบตรวจรับการจ้าง','รายงานผลการตรวจรับ','ใบสั่งซื้อ/จ้าง'],
-      'จัดซื้อ/จัดจ้าง':['ใบแจ้งหนี้/ใบเสร็จ','ใบตรวจรับ','เอกสารอนุมัติจัดซื้อ/จัดจ้าง'],
-      'ค่าเดินทาง':['คำสั่งอนุมัติเดินทาง','หลักฐานค่าใช้จ่าย'],
-      'ค่าใช้จ่ายอื่น':['ใบเสร็จ/หลักฐานค่าใช้จ่าย']
-    }
-  };
-}
-
-function normalizeSettings_(data) {
-  data = data || {};
-  var out = {
-    organization:shortText_(data.organization,200),affiliation:shortText_(data.affiliation,200),
-    address:shortText_(data.address,200),numberPrefix:shortText_(data.numberPrefix,12),
-    requestTypes:cleanList_(data.requestTypes),categories:cleanList_(data.categories),
-    fundSources:cleanList_(data.fundSources),checklists:{}
-  };
-  if (!out.organization || !out.numberPrefix || !out.requestTypes.length || !out.categories.length || !out.fundSources.length) throw new Error('กรุณากรอกการตั้งค่าที่จำเป็น');
-  out.requestTypes.forEach(function(type) {
-    out.checklists[type] = cleanList_(data.checklists && data.checklists[type] || []);
-  });
-  return out;
-}
-
-function normalizeRequest_(data,settings) {
-  var date = isoDate_(data.requestDate);
-  var type = shortText_(data.requestType,120), category = shortText_(data.category,120);
-  var selectedSource = String(data.fundSource || '').trim();
-  var isCustomSource = selectedSource === '__OTHER__';
-  var source = isCustomSource ? String(data.customFundSource || '').trim() : selectedSource;
-  if (!source || source.length > 120 || /[\r\n]/.test(source) || source === '__OTHER__')
-    throw new Error('กรุณาระบุแหล่งเงินที่ถูกต้อง ไม่เกิน 120 ตัวอักษร');
-  var addFundSource = settings.fundSources.indexOf(source) < 0;
-  if (settings.requestTypes.indexOf(type)<0 || settings.categories.indexOf(category)<0 ||
-      (addFundSource && !isCustomSource && source !== 'เงินอุดหนุน'))
-    throw new Error('ประเภทฎีกา หมวด หรือแหล่งเงินไม่ถูกต้อง');
-  if (addFundSource && settings.fundSources.length >= 100)
-    throw new Error('รายการแหล่งเงินเต็ม กรุณาติดต่อผู้ดูแลระบบ');
-  var items = Array.isArray(data.items) ? data.items : [];
-  if (!items.length || items.length > 100) throw new Error('ต้องมีรายการค่าใช้จ่าย 1–100 รายการ');
-  var normalizedItems = items.map(function(x) {
-    var description = shortText_(x.description,250), unit = shortText_(x.unit,40);
-    var quantity = Number(x.quantity), price = money_(x.unitPrice);
-    if (!description || !unit || !isFinite(quantity) || quantity <= 0 || quantity > 1000000 || price < 0) throw new Error('รายการค่าใช้จ่ายไม่ถูกต้อง');
-    quantity = Math.round(quantity * 1000) / 1000;
-    var amount = round2_(quantity * price);
-    if (amount <= 0) throw new Error('ยอดรวมรายการต้องมากกว่า 0');
-    return {description:description,quantity:quantity,unit:unit,unitPrice:price,amount:amount};
-  });
-  var total = round2_(normalizedItems.reduce(function(a,x){return a+x.amount;},0));
-  if (total > 1000000000) throw new Error('ยอดรวมสูงเกินขอบเขตระบบ');
-  var requesterName = shortText_(data.requesterName,120);
-  var unitName = shortText_(data.unit,160);
-  var payeeName = shortText_(data.payeeName,160);
-  if (!requesterName || !unitName || !payeeName) throw new Error('กรุณาระบุผู้ขอ หน่วยงาน และผู้รับเงิน');
-  return {requestDate:date,requesterName:requesterName,unit:unitName,requestType:type,category:category,
-    fundSource:source,addFundSource:addFundSource,project:shortText_(data.project,250),payeeName:payeeName,
-    payeeAddress:shortText_(data.payeeAddress,300),memo:shortText_(data.memo,1000),items:normalizedItems,total:total};
-}
-
-function currentUser_(token,allowChange) {
-  if (!PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID'))
-    throw new Error('ยังไม่ได้ตั้งค่าระบบ ให้เจ้าของสคริปต์รัน setupSystem');
-  if (typeof token!=='string' || token.length<80 || token.length>200)
-    throw new Error('SESSION_EXPIRED: กรุณาเข้าสู่ระบบใหม่');
-  var session = CacheService.getScriptCache().get('AUTH_'+tokenHash_(token));
-  if (!session) throw new Error('SESSION_EXPIRED: กรุณาเข้าสู่ระบบใหม่');
-  var parts = session.split('|');
-  var user = getAll_('Users').filter(function(x){return String(x.username).toLowerCase()===String(parts[0]).toLowerCase();})[0];
-  if (!user || !truthy_(user.active) || Number(user.authVersion||1)!==Number(parts[1]))
-    throw new Error('SESSION_EXPIRED: กรุณาเข้าสู่ระบบใหม่');
-  if (truthy_(user.mustChangePassword) && !allowChange)
-    throw new Error('PASSWORD_CHANGE_REQUIRED: กรุณาเปลี่ยนรหัสผ่านเริ่มต้น');
-  return user;
-}
-function publicUser_(u) {
-  return {email:u.email,name:u.name,username:u.username,role:u.role,
-    active:truthy_(u.active),mustChangePassword:truthy_(u.mustChangePassword)};
-}
-function randomSecret_() {return Utilities.getUuid()+Utilities.getUuid()+Utilities.getUuid();}
-function hex_(bytes) {return bytes.map(function(b){return ('0'+((b+256)%256).toString(16)).slice(-2);}).join('');}
-function tokenHash_(token) {return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,token));}
-function passwordHash_(password,salt) {
-  var pepper=PropertiesService.getScriptProperties().getProperty('AUTH_PEPPER');
-  if (!pepper) throw new Error('ยังไม่ได้ตั้งค่า Login');
-  return Utilities.base64Encode(Utilities.computeHmacSha256Signature(salt+'|'+password,pepper));
-}
-function constantTimeEquals_(a,b) {
-  if (a.length!==b.length) return false;
-  var difference=0;
-  for (var i=0;i<a.length;i++) difference|=a.charCodeAt(i)^b.charCodeAt(i);
-  return difference===0;
-}
-function validateNewPassword_(password,username) {
-  if (password.length<10 || password.length>128 || password.toLowerCase().indexOf(String(username).toLowerCase())>=0)
-    throw new Error('รหัสผ่านใหม่ต้องมี 10–128 ตัวอักษร และไม่ประกอบด้วยชื่อผู้ใช้');
-}
-function hasRole_(user,roles) {return user.role==='ADMIN' || roles.indexOf(user.role)>=0;}
-function requireRole_(user,roles) {if (!hasRole_(user,roles)) throw new Error('ไม่มีสิทธิ์ดำเนินการ');}
-function canRead_(user,r) {if (r.requesterEmail!==user.email && !hasRole_(user,['FINANCE','APPROVER','AUDITOR'])) throw new Error('ไม่มีสิทธิ์ดูฎีกานี้');}
-function canEdit_(user,r) {
-  if (['DRAFT','RETURNED'].indexOf(r.status)<0) throw new Error('แก้ไขได้เฉพาะร่างหรือรายการส่งกลับ');
-  if (r.requesterEmail!==user.email && user.role!=='ADMIN') throw new Error('แก้ไขได้เฉพาะฎีกาของตนเอง');
-}
-function assertVersion_(r,v) {if (Number(r.version)!==Number(v)) throw new Error('รายการนี้ถูกแก้ไขโดยผู้อื่นแล้ว กรุณาเปิดใหม่');}
-function mustRequest_(id) {var r=findBy_('Requests','id',id); if (!r) throw new Error('ไม่พบฎีกา'); return r;}
-function visibleRequests_(user) {
-  return getAll_('Requests').filter(function(x){return x.requesterEmail===user.email || hasRole_(user,['FINANCE','APPROVER','AUDITOR']);})
-    .map(cleanRow_).sort(function(a,b){return String(b.updatedAt).localeCompare(String(a.updatedAt));});
-}
-function dashboard_(requests) {
-  var counts = {}, paidByMonth = {}, bySource = {};
-  APP_STATUSES.forEach(function(s){counts[s]=0;});
-  var payments = getAll_('Payments');
-  requests.forEach(function(r) {
-    counts[r.status] = (counts[r.status]||0)+1;
-    if (['CANCELLED','REJECTED'].indexOf(r.status)<0)
-      bySource[r.fundSource] = round2_((bySource[r.fundSource]||0)+Number(r.total));
-  });
-  var visibleIds = {};
-  requests.forEach(function(r){visibleIds[r.id]=true;});
-  payments.filter(function(p){return visibleIds[p.requestId];}).forEach(function(p) {
-    var month = String(p.paymentDate).slice(0,7);
-    paidByMonth[month] = round2_((paidByMonth[month]||0)+Number(p.amount));
-  });
-  return {counts:counts,paidByMonth:paidByMonth,bySource:bySource};
-}
-function budgetUsed_(year,source,category) {
-  var requests = getAll_('Requests').filter(function(r) {
-    return Number(r.fiscalYear)===Number(year) && r.fundSource===source && r.category===category &&
-      ['APPROVED','PAID','CLOSED'].indexOf(r.status)>=0;
-  });
-  var allPayments = getAll_('Payments');
-  var committed = 0, paid = 0;
-  requests.forEach(function(r) {
-    var p = allPayments.filter(function(x){return x.requestId===r.id;}).reduce(function(a,x){return a+Number(x.amount);},0);
-    paid += p; committed += Math.max(0,Number(r.total)-p);
-  });
-  return {committed:round2_(committed),paid:round2_(paid)};
-}
-function budgetOverview_() {
-  return getAll_('Budgets').map(function(b) {
-    var used=budgetUsed_(b.fiscalYear,b.fundSource,b.category);
-    return {id:b.id,fiscalYear:Number(b.fiscalYear),fundSource:b.fundSource,category:b.category,
-      allocated:Number(b.allocated),committed:used.committed,paid:used.paid,
-      remaining:round2_(Number(b.allocated)-used.committed-used.paid)};
-  });
-}
-function assertBudgetAvailable_(r) {
-  var b=getAll_('Budgets').filter(function(x){return Number(x.fiscalYear)===Number(r.fiscalYear) && x.fundSource===r.fundSource && x.category===r.category;})[0];
-  if (!b) return; // Budget tracking is optional until allocations have been configured.
-  var used=budgetUsed_(r.fiscalYear,r.fundSource,r.category);
-  if (Number(b.allocated)-used.committed-used.paid+0.001<Number(r.total)) throw new Error('งบคงเหลือไม่พออนุมัติฎีกานี้');
-}
-function sumPayments_(id) {
-  return round2_(getAll_('Payments').filter(function(x){return x.requestId===id;}).reduce(function(a,x){return a+Number(x.amount);},0));
-}
-function nextNumber_(date) {
-  var year=fiscalYear_(date), prefix=settings_().numberPrefix, prop='SEQ_'+year;
-  var props=PropertiesService.getScriptProperties();
-  var n=Number(props.getProperty(prop)||0);
-  getAll_('Requests').forEach(function(r) {
-    if (Number(r.fiscalYear)===year && r.number) {
-      var m=String(r.number).match(/-(\d+)$/);
-      if (m) n=Math.max(n,Number(m[1]));
-    }
-  });
-  n+=1;
-  props.setProperty(prop,String(n));
-  return prefix+'-'+year+'-'+String(n).padStart(4,'0');
-}
-function settings_() {
-  var row=findBy_('Settings','key','config');
-  if (!row) throw new Error('ยังไม่มีการตั้งค่าระบบ');
-  return JSON.parse(row.valueJson);
-}
-function approvalLog_(id,user,stage,decision,comment) {
-  append_('ApprovalsLog',{id:Utilities.getUuid(),requestId:id,stage:stage,decision:decision,comment:comment,
-    actorEmail:user.email,actorName:user.name,actorRole:user.role,at:now_()});
-}
-function log_(id,user,action,details) {
-  append_('AuditLog',{id:Utilities.getUuid(),requestId:id,actorEmail:user.email,actorRole:user.role,
-    action:action,detailsJson:JSON.stringify(details||{}),at:now_()});
-}
-function requestSnapshot_(r) {
-  return {number:r.number,status:r.status,total:r.total,requestDate:r.requestDate,requestType:r.requestType,
-    category:r.category,fundSource:r.fundSource,project:r.project,payeeName:r.payeeName};
-}
-function locked_(fn) {
-  var lock=LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {var result=fn(); SpreadsheetApp.flush(); return result;}
-  finally {lock.releaseLock();}
-}
-function book_() {
-  var id=PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
-  if (!id) throw new Error('ยังไม่ได้ตั้งค่าระบบ');
-  return SpreadsheetApp.openById(id);
-}
-function sheet_(name) {
-  var sh=book_().getSheetByName(name);
-  if (!sh) throw new Error('ไม่พบชีต '+name);
-  return sh;
-}
-function getAll_(name) {
-  var sh=sheet_(name), last=sh.getLastRow();
-  if (last<2) return [];
-  var headers=APP_SHEETS[name];
-  return sh.getRange(2,1,last-1,headers.length).getValues().map(function(values,index) {
-    var x={_row:index+2}; headers.forEach(function(key,i){x[key]=values[i];}); return x;
-  });
-}
-function findBy_(name,key,value) {
-  var rows=getAll_(name);
-  for(var i=0;i<rows.length;i++) if(String(rows[i][key])===String(value)) return rows[i];
-  return null;
-}
-function append_(name,obj) {
-  var row=APP_SHEETS[name].map(function(key){return safeCell_(obj[key]===undefined?'':obj[key]);});
-  sheet_(name).appendRow(row);
-}
-function patch_(row,changes) {
-  var name;
-  Object.keys(APP_SHEETS).some(function(n){
-    if (APP_SHEETS[n].every(function(k){return Object.prototype.hasOwnProperty.call(row,k);})) {name=n;return true;}
-    return false;
-  });
-  if (!name) throw new Error('ไม่สามารถอัปเดตแถวได้');
-  var merged={};
-  APP_SHEETS[name].forEach(function(k){merged[k]=Object.prototype.hasOwnProperty.call(changes,k)?changes[k]:row[k];});
-  sheet_(name).getRange(row._row,1,1,APP_SHEETS[name].length)
-    .setValues([APP_SHEETS[name].map(function(k){return safeCell_(merged[k]);})]);
-}
-function safeCell_(v) {return typeof v==='string' && /^[=]/.test(v) ? "'"+v : v;}
-function cleanRow_(row) {
-  var out={}; Object.keys(row).forEach(function(k){if(k!=='_row') out[k]=row[k];}); return out;
-}
-function now_() {return Utilities.formatDate(new Date(),APP_TZ,"yyyy-MM-dd'T'HH:mm:ss");}
-function isoDate_(v) {
-  v=String(v||'');
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error('วันที่ต้องอยู่ในรูปแบบ YYYY-MM-DD');
-  var d=new Date(v+'T12:00:00Z');
-  if(isNaN(d.getTime()) || d.toISOString().slice(0,10)!==v) throw new Error('วันที่ไม่ถูกต้อง');
-  return v;
-}
-function fiscalYear_(date) {
-  var y=Number(String(date).slice(0,4)),m=Number(String(date).slice(5,7));
-  return y+543+(m>=10?1:0);
-}
-function shortText_(v,max) {return String(v===undefined||v===null?'':v).trim().slice(0,max);}
-function cleanList_(v) {
-  if(!Array.isArray(v)) return [];
-  var seen={};
-  return v.map(function(x){return shortText_(x,120);}).filter(function(x){if(!x||seen[x])return false;seen[x]=true;return true;}).slice(0,100);
-}
-function round2_(n) {return Math.round((Number(n)+Number.EPSILON)*100)/100;}
-function money_(v) {
-  var n=Number(v);
-  if(!isFinite(n)||n<0||n>1000000000) throw new Error('จำนวนเงินไม่ถูกต้อง');
-  return round2_(n);
-}
-function truthy_(v) {return v===true || v==='TRUE' || v==='true' || v===1;}
+  function renderRegistry(){var b=state.bootstrap;var statusesList=Object.keys(statuses);$('page-registry').innerHTML='<div class="card"><div class="card-head"><h2>ค้นหาทะเบียนฎีกา</h2><span class="muted tiny">'+b.requests.length+' รายการ</span></div><div class="filters"><input id="registrySearch" placeholder="ค้นเลขฎีกา ผู้ขอ หรือผู้รับเงิน"><select id="registryStatus">'+optionList(statusesList.map(function(x){return x}), '', 'ทุกสถานะ')+'</select><select id="registryYear"><option value="">ทุกปีงบประมาณ</option>'+Array.from(new Set(b.requests.map(function(x){return x.fiscalYear}))).sort().reverse().map(function(y){return '<option value="'+esc(y)+'">'+esc(y)+'</option>'}).join('')+'</select><select id="registryFund">'+optionList(b.settings.fundSources,'','ทุกแหล่งเงิน')+'</select></div><div id="registryTable"></div></div>';var sel=$('registryStatus');Array.from(sel.options).forEach(function(o){if(statuses[o.value])o.textContent=statuses[o.value]});filterRegistry()}
+  function filterRegistry(){if(!$('registryTable'))return;var q=($('registrySearch').value||'').trim().toLowerCase(),s=$('registryStatus').value,y=$('registryYear').value,f=$('registryFund').value;var rows=state.bootstrap.requests.filter(function(r){return (!q||[r.number,r.requesterName,r.payeeName,r.project].join(' ').toLowerCase().indexOf(q)>=0)&&(!s||r.status===s)&&(!y||String(r.fiscalYear)===y)&&(!f||r.fundSource===f)});$('registryTable').innerHTML=tableRequestRows(rows)}
+  function itemRow(x){x=x||{description:'',quantity:1,unit:'รายการ',unitPrice:''};return '<div class="item-grid item-row"><div><label>รายการค่าใช้จ่าย</label><input class="item-desc" value="'+esc(x.description)+'" placeholder="เช่น ค่าจ้างเหมาผู้ช่วยเหลือดูแลผู้สูงอายุ"></div><div><label>จำนวน</label><input class="item-qty" type="number" step="0.001" min="0.001" value="'+esc(x.quantity)+'"></div><div><label>หน่วย</label><input class="item-unit" value="'+esc(x.unit)+'"></div><div class="price"><label>ราคาต่อหน่วย</label><input class="item-price" type="number" step="0.01" min="0" value="'+esc(x.unitPrice)+'"></div><div class="amount"><label>รวม</label><div class="item-amount">0.00</div></div><button type="button" class="btn small remove" data-remove-item title="ลบรายการ">×</button></div>'}
+  function renderForm(){var b=state.bootstrap,s=b.settings,e=state.editing||{},items=e.items&&e.items.length?e.items:[null],fundChoices=fundSourceChoices(s.fundSources,e.fundSource);$('page-form').innerHTML='<div class="card"><div class="card-head"><h2 id="formHeading">'+(e.id?'แก้ไขร่าง '+esc(e.number||''):'ข้อมูลคำขอเบิก')+'</h2><span class="muted tiny">เลขฎีกาจะออกเมื่อส่งตรวจ</span></div><form id="requestForm"><div class="form-grid"><div class="field"><label>วันที่ทำฎีกา *</label><input name="requestDate" type="date" required value="'+esc(e.requestDate||today())+'"></div><div class="field"><label>ผู้ขอเบิก *</label><input name="requesterName" required maxlength="120" value="'+esc(e.requesterName||b.user.name)+'"></div><div class="field"><label>หน่วยงาน *</label><input name="unit" required maxlength="160" value="'+esc(e.unit||s.organization)+'"></div><div class="field"><label>ประเภทฎีกา *</label><select name="requestType" required>'+optionList(s.requestTypes,e.requestType)+'</select></div><div class="field"><label>หมวดค่าใช้จ่าย *</label><select name="category" required>'+optionList(s.categories,e.category)+'</select></div><div class="field"><label>แหล่งเงิน *</label><select id="fundSourceSelect" name="fundSource" required>'+fundChoices.options+'</select></div><div class="field'+(fundChoices.custom?'':' hidden')+'" id="customFundSourceField"><label>ระบุแหล่งเงินอื่น ๆ *</label><input id="customFundSource" name="customFundSource" maxlength="120" placeholder="พิมพ์ชื่อแหล่งเงิน" value="'+esc(fundChoices.custom?e.fundSource:'')+'"'+(fundChoices.custom?' required':'')+'></div><div class="field span2"><label>โครงการ / กิจกรรม</label><input name="project" maxlength="250" value="'+esc(e.project)+'"></div><div class="field"><label>ผู้รับเงิน *</label><input name="payeeName" required maxlength="160" value="'+esc(e.payeeName)+'"></div><div class="field span3"><label>ที่อยู่ผู้รับเงิน</label><input name="payeeAddress" maxlength="300" value="'+esc(e.payeeAddress)+'"></div><div class="field span3"><label>หมายเหตุ</label><textarea name="memo" maxlength="1000">'+esc(e.memo)+'</textarea></div></div><div class="detail-section"><div class="card-head"><h3>รายการค่าใช้จ่าย</h3><button class="btn small" type="button" id="addItem">＋ เพิ่มรายการ</button></div><div id="itemRows">'+items.map(itemRow).join('')+'</div><div class="total-line"><span>รวมทั้งสิ้น</span><strong id="formTotal">0.00 บาท</strong></div></div><p class="section-note">บันทึกร่างก่อน แล้วเปิดรายการเพื่อแนบเอกสารตาม checklist</p><div class="form-actions"><button type="button" class="btn" id="clearForm">เริ่มรายการใหม่</button><button type="submit" class="btn primary">บันทึกร่าง</button></div></form></div>';calcFormTotal()}
+  function calcFormTotal(){var sum=0;document.querySelectorAll('.item-row').forEach(function(row){var q=Number(row.querySelector('.item-qty').value)||0,p=Number(row.querySelector('.item-price').value)||0,v=Math.round(q*p*100)/100;row.querySelector('.item-amount').textContent=money(v);sum+=v});if($('formTotal'))$('formTotal').textContent=money(sum)+' บาท'}
+  function formData(){var form=$('requestForm'),f=new FormData(form),items=Array.from(form.querySelectorAll('.item-row')).map(function(row){return {description:row.querySelector('.item-desc').value,quantity:Number(row.querySelector('.item-qty').value),unit:row.querySelector('.item-unit').value,unitPrice:Number(row.querySelector('.item-price').value)}});return {id:state.editing&&state.editing.id,version:state.editing&&state.editing.version,requestDate:f.get('requestDate'),requesterName:f.get('requesterName'),unit:f.get('unit'),requestType:f.get('requestType'),category:f.get('category'),fundSource:f.get('fundSource'),customFundSource:f.get('customFundSource'),project:f.get('project'),payeeName:f.get('payeeName'),payeeAddress:f.get('payeeAddress'),memo:f.get('memo'),items:items}}
+  async function saveForm(){var data=formData();if(!data.items.length){toast('กรุณาเพิ่มรายการค่าใช้จ่าย',true);return}await call('saveRequest',[data],async function(detail){state.editing=null;await refresh();openDetailData(detail);toast('บันทึกร่างแล้ว')})}
+  function renderReports(){var b=state.bootstrap;if(!isRole(['FINANCE','APPROVER','AUDITOR']))return;$('page-reports').innerHTML='<div class="card"><div class="card-head"><h2>รายงานทะเบียนฎีกา</h2><button class="btn" id="exportCsv">ส่งออก CSV</button></div><div class="filters"><select id="reportYear"><option value="">ทุกปีงบประมาณ</option>'+Array.from(new Set(b.requests.map(function(x){return x.fiscalYear}))).sort().reverse().map(function(y){return '<option>'+esc(y)+'</option>'}).join('')+'</select><select id="reportFund">'+optionList(b.settings.fundSources,'','ทุกแหล่งเงิน')+'</select><select id="reportCategory">'+optionList(b.settings.categories,'','ทุกหมวด')+'</select><select id="reportStatus">'+optionList(Object.keys(statuses),'','ทุกสถานะ')+'</select><button class="btn primary" id="runReport">แสดงรายงาน</button></div><div id="reportResults"><div class="empty">กด “แสดงรายงาน” เพื่อดึงข้อมูล</div></div></div>';Array.from($('reportStatus').options).forEach(function(o){if(statuses[o.value])o.textContent=statuses[o.value]})}
+  async function runReport(){var f={fiscalYear:$('reportYear').value,fundSource:$('reportFund').value,category:$('reportCategory').value,status:$('reportStatus').value};await call('getReport',[f],function(rows){state.report=rows;var total=rows.reduce(function(a,x){return a+Number(x.total)},0),paid=rows.reduce(function(a,x){return a+Number(x.paid)},0);$('reportResults').innerHTML='<p class="muted tiny">'+rows.length+' รายการ · ยอดเบิก '+money(total)+' บาท · จ่ายแล้ว '+money(paid)+' บาท</p>'+(rows.length?'<div class="table-wrap"><table class="table"><thead><tr><th>เลขฎีกา</th><th>วันที่</th><th>ผู้ขอ</th><th>หมวด</th><th>แหล่งเงิน</th><th class="right">ยอดเบิก</th><th class="right">จ่ายแล้ว</th><th class="right">ค้างจ่าย</th><th>สถานะ</th></tr></thead><tbody>'+rows.map(function(r){return '<tr class="clickable" data-open="'+esc(r.id)+'"><td>'+esc(r.number||'—')+'</td><td>'+date(r.requestDate)+'</td><td>'+esc(r.requesterName)+'</td><td>'+esc(r.category)+'</td><td>'+esc(r.fundSource)+'</td><td class="right">'+money(r.total)+'</td><td class="right">'+money(r.paid)+'</td><td class="right">'+money(r.outstanding)+'</td><td>'+badge(r.status)+'</td></tr>'}).join('')+'</tbody></table></div>':'<div class="empty">ไม่มีข้อมูลตรงตามตัวกรอง</div>')})}
+  function downloadCsv(){if(!state.report.length){toast('กรุณาแสดงรายงานก่อน',true);return}var cols=['number','requestDate','fiscalYear','requesterName','requestType','category','fundSource','payeeName','total','paid','outstanding','status'],header=['เลขฎีกา','วันที่','ปีงบประมาณ','ผู้ขอ','ประเภท','หมวด','แหล่งเงิน','ผู้รับเงิน','ยอดเบิก','จ่ายแล้ว','ค้างจ่าย','สถานะ'];var quote=function(v){return '"'+String(v===undefined?'':v).replace(/"/g,'""')+'"'};var csv='\ufeff'+header.map(quote).join(',')+'\r\n'+state.report.map(function(r){return cols.map(function(c){var v=c==='status'?statuses[r[c]]:r[c];if(typeof v==='string'&&/^[=+\-@]/.test(v))v="'"+v;return quote(v)}).join(',')}).join('\r\n');var url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));var a=document.createElement('a');a.href=url;a.download='ทะเบียนฎีกา_'+today()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url)},5000)}
+  function renderBudgets(){if(!isRole(['FINANCE','APPROVER','AUDITOR']))return;var b=state.bootstrap,s=b.settings,rows=b.budgets||[];$('page-budgets').innerHTML='<div class="card"><div class="card-head"><h2>ทะเบียนงบประมาณ</h2><span class="muted tiny">ยอดคงเหลือ = จัดสรร − ผูกพัน − จ่ายแล้ว</span></div>'+(rows.length?'<div class="table-wrap"><table class="table"><thead><tr><th>ปีงบ</th><th>แหล่งเงิน</th><th>หมวด</th><th class="right">จัดสรร</th><th class="right">ผูกพันค้างจ่าย</th><th class="right">จ่ายแล้ว</th><th class="right">คงเหลือ</th></tr></thead><tbody>'+rows.map(function(r){return '<tr><td>'+esc(r.fiscalYear)+'</td><td>'+esc(r.fundSource)+'</td><td>'+esc(r.category)+'</td><td class="right">'+money(r.allocated)+'</td><td class="right">'+money(r.committed)+'</td><td class="right">'+money(r.paid)+'</td><td class="right"><b>'+money(r.remaining)+'</b></td></tr>'}).join('')+'</tbody></table></div>':'<div class="empty">ยังไม่ได้ตั้งยอดจัดสรร</div>')+'</div>'+(b.user.role==='ADMIN'?'<div class="card"><h2>เพิ่ม / ปรับยอดจัดสรร</h2><p class="section-note">หากปี แหล่งเงิน และหมวดซ้ำ ระบบจะปรับยอดเดิม</p><form id="budgetForm"><div class="form-grid"><div class="field"><label>ปีงบประมาณ พ.ศ.</label><input name="fiscalYear" type="number" min="2500" max="2700" required value="'+(new Date().getFullYear()+543+(new Date().getMonth()>=9?1:0))+'"></div><div class="field"><label>แหล่งเงิน</label><select name="fundSource">'+optionList(s.fundSources)+'</select></div><div class="field"><label>หมวด</label><select name="category">'+optionList(s.categories)+'</select></div><div class="field"><label>ยอดจัดสรร (บาท)</label><input name="allocated" type="number" step="0.01" min="0" required></div></div><div class="form-actions"><button class="btn primary" type="submit">บันทึกงบประมาณ</button></div></form></div>':'')}
+  function renderAdmin(){if(state.bootstrap.user.role!=='ADMIN'){$('page-admin').innerHTML='';return}var b=state.bootstrap,s=b.settings,types=s.requestTypes||[];$('page-admin').innerHTML='<div class="card"><h2>ข้อมูลหน่วยงานและตัวเลือก</h2><p class="section-note">รายการในช่องหลายบรรทัด: หนึ่งค่าต่อหนึ่งบรรทัด</p><form id="settingsForm"><div class="field"><label>ชื่อหน่วยงาน</label><input name="organization" value="'+esc(s.organization)+'" required></div><div class="field"><label>สังกัด</label><input name="affiliation" value="'+esc(s.affiliation)+'"></div><div class="field"><label>ที่อยู่</label><input name="address" value="'+esc(s.address)+'"></div><div class="field"><label>คำนำหน้าเลขฎีกา</label><input name="numberPrefix" value="'+esc(s.numberPrefix)+'" required></div><div class="field"><label>ประเภทฎีกา</label><textarea name="requestTypes" id="requestTypesText">'+esc(types.join('\n'))+'</textarea></div><div class="field"><label>หมวดค่าใช้จ่าย</label><textarea name="categories">'+esc(s.categories.join('\n'))+'</textarea></div><div class="field"><label>แหล่งเงิน</label><textarea name="fundSources">'+esc(s.fundSources.join('\n'))+'</textarea></div><div class="card-head" style="margin-top:18px"><h3>เอกสารที่ต้องแนบก่อนส่งตรวจ</h3><button class="btn small" type="button" id="syncChecklists">อัปเดตประเภท</button></div><div id="checklistFields"></div><div class="form-actions"><button class="btn primary" type="submit">บันทึกการตั้งค่า</button></div></form></div>';syncChecklistFields(s.checklists)}
+  function renderUsers(){if(state.bootstrap.user.role!=='ADMIN'){$('page-users').innerHTML='';return}var b=state.bootstrap;$('page-users').innerHTML='<div class="split-admin"><div><div class="card"><h2>เพิ่ม / ปรับสิทธิ์ผู้ใช้</h2><p class="section-note">กำหนดชื่อผู้ใช้ รหัสผ่านเริ่มต้น และบทบาท ผู้ใช้ต้องเปลี่ยนรหัสผ่านเมื่อเข้าครั้งแรก</p><form id="userForm"><input name="existing" type="hidden" value=""><div class="field"><label>ชื่อผู้ใช้</label><input name="username" pattern="[A-Za-z0-9._-]{3,32}" title="ใช้ A–Z, 0–9, จุด, ขีดกลาง หรือขีดล่าง จำนวน 3–32 ตัว" required></div><div class="field"><label>อีเมล (ถ้ามี)</label><input name="email" type="email" placeholder="user@example.com"></div><div class="field"><label>ชื่อแสดง</label><input name="name" required></div><div class="field"><label>บทบาท</label><select name="role">'+Object.keys(roles).map(function(k){return '<option value="'+k+'">'+esc(roles[k])+'</option>'}).join('')+'</select></div><div class="field"><label>รหัสผ่านเริ่มต้น / ตั้งใหม่</label><input name="password" type="password" minlength="10" autocomplete="new-password" placeholder="เว้นว่างหากไม่เปลี่ยนรหัสผ่าน"></div><div class="field"><label><input name="active" type="checkbox" checked> เปิดใช้งาน</label></div><div class="form-actions"><button class="btn" type="button" id="newUserBtn">ล้างฟอร์ม</button><button class="btn primary" type="submit">บันทึกผู้ใช้</button></div></form></div></div><div><div class="card"><h2>ผู้ใช้ในระบบ</h2><div class="table-wrap"><table class="table"><thead><tr><th>ชื่อ</th><th>บทบาท</th><th>สถานะ</th></tr></thead><tbody>'+b.users.map(function(u){return '<tr class="clickable" data-user="'+esc(u.username||u.email)+'"><td><b>'+esc(u.name)+'</b><br><span class="muted tiny">'+esc(u.username||'ยังไม่ได้ตั้งชื่อผู้ใช้')+(u.email&&u.email.indexOf('login:')!==0?' · '+esc(u.email):'')+'</span></td><td>'+esc(roles[u.role])+'</td><td>'+(u.active?'ใช้งาน':'ปิด')+'</td></tr>'}).join('')+'</tbody></table></div></div></div></div>';}
+  function lines(v){return String(v||'').split(/\r?\n/).map(function(x){return x.trim()}).filter(Boolean)}
+  function syncChecklistFields(existing){var types=lines($('requestTypesText').value),old={};document.querySelectorAll('.checklist-text').forEach(function(el){old[el.dataset.type]=el.value});$('checklistFields').innerHTML=types.map(function(type){var value=old[type]!==undefined?old[type]:(existing&&existing[type]||[]).join('\n');return '<div class="field"><label>'+esc(type)+'</label><textarea class="checklist-text" data-type="'+esc(type)+'" placeholder="หนึ่งเอกสารต่อหนึ่งบรรทัด">'+esc(value)+'</textarea></div>'}).join('')}
+  async function saveSettings(){var f=new FormData($('settingsForm')),checklists={};document.querySelectorAll('.checklist-text').forEach(function(el){checklists[el.dataset.type]=lines(el.value)});var data={organization:f.get('organization'),affiliation:f.get('affiliation'),address:f.get('address'),numberPrefix:f.get('numberPrefix'),requestTypes:lines(f.get('requestTypes')),categories:lines(f.get('categories')),fundSources:lines(f.get('fundSources')),checklists:checklists};await call('saveSettings',[data],async function(){await refresh();toast('บันทึกการตั้งค่าแล้ว')})}
+  async function saveUser(){var f=new FormData($('userForm')),password=String(f.get('password')||'');if(!f.get('username')||(!f.get('existing')&&!password)){toast('กรุณาระบุชื่อผู้ใช้และรหัสผ่านเริ่มต้น',true);return}await call('saveUser',[{username:f.get('username'),email:f.get('email'),name:f.get('name'),role:f.get('role'),active:f.has('active'),password:password}],async function(){await refresh();toast('บันทึกผู้ใช้แล้ว')})}
+  async function saveBudget(){var f=new FormData($('budgetForm'));await call('saveBudget',[{fiscalYear:Number(f.get('fiscalYear')),fundSource:f.get('fundSource'),category:f.get('category'),allocated:Number(f.get('allocated'))}],async function(){await refresh();toast('บันทึกงบประมาณแล้ว')})}
+  async function openDetail(id){await call('getRequest',[id],function(data){openDetailData(data)})}
+  function openDetailData(data){state.detail=data;renderDetail();$('overlay').classList.add('show');$('overlay').setAttribute('aria-hidden','false');$('overlay').scrollTop=0}
+  function closeDetail(){state.detail=null;$('overlay').classList.remove('show');$('overlay').setAttribute('aria-hidden','true')}
+  function kv(label,value){return '<div class="kv"><span>'+esc(label)+'</span><b>'+esc(value||'—')+'</b></div>'}
+  function renderDetail(){var d=state.detail;if(!d)return;var r=d.request,s=state.bootstrap.settings,own=r.requesterEmail===state.bootstrap.user.email,editable=['DRAFT','RETURNED'].indexOf(r.status)>=0&&(own||state.bootstrap.user.role==='ADMIN'),finance=isRole(['FINANCE']),approver=isRole(['APPROVER']),actions=[];if(editable)actions.push('<button class="btn" data-action="edit">แก้ไขร่าง</button>','<button class="btn teal" data-action="submit">ส่งตรวจ</button>');if(r.status==='SUBMITTED'&&finance)actions.push('<button class="btn teal" data-action="pass">ตรวจผ่าน</button>','<button class="btn danger" data-action="return">ส่งกลับแก้ไข</button>');if(r.status==='VERIFIED'&&approver)actions.push('<button class="btn teal" data-action="approve">อนุมัติ</button>','<button class="btn danger" data-action="reject">ไม่อนุมัติ</button>');if(r.status==='PAID'&&finance)actions.push('<button class="btn teal" data-action="close">ปิดฎีกา</button>');if((own&&['DRAFT','RETURNED','SUBMITTED'].indexOf(r.status)>=0)||(finance&&['DRAFT','RETURNED','SUBMITTED','VERIFIED','APPROVED','REJECTED'].indexOf(r.status)>=0))actions.push('<button class="btn danger" data-action="cancel">ยกเลิก</button>');var checklist=s.checklists[r.requestType]||[],attached=d.attachments.map(function(a){return a.docType});var paid=d.payments.reduce(function(x,p){return x+Number(p.amount)},0);var uploadTypes=Array.from(new Set(checklist.concat(['ใบเสร็จ/ใบสำคัญรับเงิน','หลักฐานอนุมัติ','เอกสารอื่น ๆ'])));$('detailContent').innerHTML='<div class="dialog-head"><div><div class="eyebrow">รายละเอียดฎีกา</div><h2 id="detailTitle">'+esc(r.number||'ร่างยังไม่ออกเลข')+' '+badge(r.status)+'</h2><div class="muted tiny">สร้าง '+datetime(r.createdAt)+' · แก้ไขล่าสุด '+datetime(r.updatedAt)+'</div></div><button class="dialog-close" data-action="dismiss" aria-label="ปิด">×</button></div><div class="detail-grid">'+kv('วันที่ทำฎีกา',date(r.requestDate))+kv('ปีงบประมาณ',String(r.fiscalYear))+kv('ผู้ขอเบิก',r.requesterName)+kv('หน่วยงาน',r.unit)+kv('ประเภท',r.requestType)+kv('หมวด',r.category)+kv('แหล่งเงิน',r.fundSource)+kv('โครงการ / กิจกรรม',r.project)+kv('ผู้รับเงิน',r.payeeName)+kv('ที่อยู่ผู้รับเงิน',r.payeeAddress)+kv('หมายเหตุ',r.memo)+kv('ยอดเบิก',money(r.total)+' บาท')+'</div><div class="detail-section"><h3>รายการค่าใช้จ่าย</h3><div class="table-wrap"><table class="table"><thead><tr><th>รายการ</th><th class="right">จำนวน</th><th>หน่วย</th><th class="right">ราคาต่อหน่วย</th><th class="right">รวม</th></tr></thead><tbody>'+d.items.map(function(x){return '<tr><td>'+esc(x.description)+'</td><td class="right">'+esc(x.quantity)+'</td><td>'+esc(x.unit)+'</td><td class="right">'+money(x.unitPrice)+'</td><td class="right">'+money(x.amount)+'</td></tr>'}).join('')+'</tbody></table></div></div><div class="detail-section"><h3>เอกสารประกอบ</h3><p class="section-note">ต้องแนบก่อนส่งตรวจ: '+(checklist.length?checklist.map(function(x){return (attached.indexOf(x)>=0?'✓ ':'○ ')+esc(x)}).join(' · '):'ไม่มีรายการบังคับ')+'</p>'+(d.attachments.length?'<div class="table-wrap"><table class="table"><thead><tr><th>ประเภท</th><th>ชื่อไฟล์</th><th>อัปโหลดโดย</th><th></th></tr></thead><tbody>'+d.attachments.map(function(a){return '<tr><td>'+esc(a.docType)+'</td><td>'+esc(a.fileName)+'</td><td>'+esc(a.uploadedBy)+'</td><td><button class="btn small" data-download="'+esc(a.id)+'">เปิดไฟล์</button> '+(editable?'<button class="btn small danger" data-remove-attachment="'+esc(a.id)+'">นำออก</button>':'')+'</td></tr>'}).join('')+'</tbody></table></div>':'<div class="muted tiny">ยังไม่มีไฟล์แนบ</div>')+(editable?'<div class="upload-row" style="margin-top:13px"><div class="field"><label>ประเภทเอกสาร</label><select id="docType">'+optionList(uploadTypes)+'</select></div><div class="field"><label>ไฟล์ PDF / JPG / PNG ไม่เกิน 8 MB</label><input id="attachmentFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"></div><button class="btn primary" data-action="upload">แนบไฟล์</button></div>':'')+'</div><div class="detail-section"><h3>การตรวจและอนุมัติ</h3>'+(d.approvals.length?'<div class="history">'+d.approvals.map(function(a){return '<div class="history-entry"><b>'+esc(a.actorName||a.actorEmail)+'</b> '+esc(a.stage)+' / '+esc(a.decision)+' · '+datetime(a.at)+(a.comment?'<br>'+esc(a.comment):'')+'</div>'}).join('')+'</div>':'<div class="muted tiny">ยังไม่มีผลดำเนินการ</div>')+'</div><div class="detail-section"><h3>การจ่ายเงิน</h3><p class="section-note">จ่ายแล้ว '+money(paid)+' บาท · ค้างจ่าย '+money(Math.max(0,Number(r.total)-paid))+' บาท</p>'+(d.payments.length?'<div class="table-wrap"><table class="table"><thead><tr><th>วันที่</th><th>วิธีจ่าย</th><th>เลขอ้างอิง</th><th class="right">ยอดจ่าย</th></tr></thead><tbody>'+d.payments.map(function(p){return '<tr><td>'+date(p.paymentDate)+'</td><td>'+esc(p.method)+'</td><td>'+esc(p.reference)+'</td><td class="right">'+money(p.amount)+'</td></tr>'}).join('')+'</tbody></table></div>':'')+(r.status==='APPROVED'&&finance?'<form id="paymentForm" class="payment-row"><div class="field"><label>วันที่จ่าย</label><input name="paymentDate" type="date" required value="'+today()+'"></div><div class="field"><label>วิธีจ่าย</label><select name="method"><option>โอนเงิน</option><option>เงินสด</option><option>เช็ค</option><option>อื่น ๆ</option></select></div><div class="field"><label>เลขอ้างอิง</label><input name="reference" required></div><div class="field"><label>ยอดจ่าย</label><input name="amount" type="number" step="0.01" min="0.01" max="'+(Number(r.total)-paid).toFixed(2)+'" required value="'+(Number(r.total)-paid).toFixed(2)+'"></div><button class="btn teal" type="submit">บันทึกจ่าย</button></form>':'')+'</div><div class="action-box"><div class="field"><label>ความเห็น / เหตุผล (ใช้เมื่อส่งกลับ ไม่อนุมัติ หรือยกเลิก)</label><textarea id="actionNote" placeholder="ระบุผลตรวจหรือเหตุผล"></textarea></div><div class="action-buttons">'+actions.join('')+'<button class="btn" data-action="print">พิมพ์ใบปะหน้า A4</button>'+(paid>=Number(r.total)-0.001?'<button class="btn" data-action="receipt">พิมพ์ใบสำคัญรับเงิน</button>':'')+'</div></div><div class="detail-section"><h3>ประวัติการดำเนินการ</h3><div class="history">'+d.audit.map(function(a){return '<div class="history-entry"><b>'+esc(a.action)+'</b>'+esc(a.actorEmail)+' · '+datetime(a.at)+'</div>'}).join('')+'</div></div>'}
+  async function mutate(name,args,msg){var id=state.detail.request.id;await call(name,args,async function(data){await refresh();openDetailData(data);toast(msg)})}
+  async function detailAction(action){var d=state.detail;if(!d)return;var r=d.request,id=r.id,v=r.version,note=($('actionNote')&&$('actionNote').value||'').trim();if(action==='dismiss'){closeDetail();return}if(action==='edit'){state.editing=Object.assign({},r,{items:d.items});closeDetail();renderForm();navigate('form');window.scrollTo(0,0);return}if(action==='print'){printDocument('cover',d);return}if(action==='receipt'){printDocument('receipt',d);return}if(action==='upload'){await uploadFile();return}if(['return','reject','cancel'].indexOf(action)>=0&&!note){toast('กรุณาระบุเหตุผลในช่องความเห็น',true);return}if(action==='cancel'&&!confirm('ยืนยันยกเลิกฎีกานี้?'))return;if(action==='submit')await mutate('submitRequest',[id,v],'ส่งตรวจแล้ว');if(action==='pass')await mutate('financeReview',[id,v,'PASS',note],'ตรวจผ่านแล้ว');if(action==='return')await mutate('financeReview',[id,v,'RETURN',note],'ส่งกลับแก้ไขแล้ว');if(action==='approve')await mutate('decideApproval',[id,v,'APPROVE',note],'อนุมัติแล้ว');if(action==='reject')await mutate('decideApproval',[id,v,'REJECT',note],'บันทึกไม่อนุมัติแล้ว');if(action==='close')await mutate('closeRequest',[id,v],'ปิดฎีกาแล้ว');if(action==='cancel')await mutate('cancelRequest',[id,v,note],'ยกเลิกฎีกาแล้ว')}
+  async function uploadFile(){var input=$('attachmentFile'),file=input&&input.files&&input.files[0];if(!file){toast('กรุณาเลือกไฟล์',true);return}if(file.size>8*1024*1024){toast('ไฟล์ใหญ่เกิน 8 MB',true);return}var type=file.type||(/\.pdf$/i.test(file.name)?'application/pdf':/\.png$/i.test(file.name)?'image/png':'image/jpeg');var b64=await new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(){resolve(String(reader.result).split(',')[1])};reader.onerror=function(){reject(new Error('อ่านไฟล์ไม่สำเร็จ'))};reader.readAsDataURL(file)});var r=state.detail.request;await mutate('uploadAttachment',[r.id,r.version,$('docType').value,file.name,type,b64],'แนบไฟล์แล้ว')}
+  async function downloadFile(aid){await call('downloadAttachment',[aid],function(file){var bytes=atob(file.base64),arr=new Uint8Array(bytes.length);for(var i=0;i<bytes.length;i++)arr[i]=bytes.charCodeAt(i);var url=URL.createObjectURL(new Blob([arr],{type:file.mimeType}));var a=document.createElement('a');a.href=url;a.download=file.fileName;a.click();setTimeout(function(){URL.revokeObjectURL(url)},10000)})}
+  async function removeFile(aid){if(!confirm('นำไฟล์นี้ออกจากรายการเอกสาร?'))return;var r=state.detail.request;await mutate('removeAttachment',[r.id,r.version,aid],'นำไฟล์ออกแล้ว')}
+  async function pay(){var r=state.detail.request,f=new FormData($('paymentForm'));var data={paymentDate:f.get('paymentDate'),method:f.get('method'),reference:f.get('reference'),amount:Number(f.get('amount'))};if(!confirm('ยืนยันบันทึกการจ่าย '+money(data.amount)+' บาท?'))return;await mutate('recordPayment',[r.id,r.version,data],'บันทึกจ่ายแล้ว')}
+  function thaiAmount(value){var digits=['ศูนย์','หนึ่ง','สอง','สาม','สี่','ห้า','หก','เจ็ด','แปด','เก้า'],places=['','สิบ','ร้อย','พัน','หมื่น','แสน'];function group(n){var s=String(n),out='';for(var i=0;i<s.length;i++){var digit=Number(s[i]),pos=s.length-i-1;if(!digit)continue;if(pos===1&&digit===1)out+='สิบ';else if(pos===1&&digit===2)out+='ยี่สิบ';else if(pos===0&&digit===1&&s.length>1)out+='เอ็ด';else out+=digits[digit]+places[pos]}return out}function whole(n){if(n===0)return digits[0];if(n>=1000000)return whole(Math.floor(n/1000000))+'ล้าน'+(n%1000000?group(n%1000000):'');return group(n)}var sat=Math.round(Number(value)*100),baht=Math.floor(sat/100),fraction=sat%100;return whole(baht)+'บาท'+(fraction?whole(fraction)+'สตางค์':'ถ้วน')}
+  function printDocument(kind,d){var r=d.request,s=state.bootstrap.settings,paid=d.payments.reduce(function(a,p){return a+Number(p.amount)},0),amount=kind==='receipt'?paid:Number(r.total),items=d.items.map(function(x){return '<tr><td>'+esc(x.description)+'</td><td class="right">'+esc(x.quantity)+' '+esc(x.unit)+'</td><td class="right">'+money(x.amount)+'</td></tr>'}).join('');var heading=kind==='receipt'?'ใบสำคัญรับเงิน':'ใบปะหน้าฎีกา / ขออนุมัติเบิกจ่ายเงิน';var body='<header><div class="org">'+esc(s.affiliation)+'<br>'+esc(s.organization)+'</div><div>'+esc(s.address)+'</div><h1>'+heading+'</h1><div class="meta"><span>เลขฎีกา <b>'+esc(r.number||'ร่างยังไม่ออกเลข')+'</b></span><span>วันที่ '+date(r.requestDate)+'</span><span>ปีงบประมาณ '+esc(r.fiscalYear)+'</span></div></header><p>เรื่อง '+esc(r.project||r.requestType)+'</p><p>เรียน ผู้อำนวยการ'+esc(s.organization)+'</p>'+(kind==='receipt'?'<p>ข้าพเจ้า '+esc(r.payeeName)+' ที่อยู่ '+esc(r.payeeAddress||'........................................')+' ได้รับเงินจาก '+esc(s.organization)+' ตามรายการดังต่อไปนี้</p>':'<p>ขออนุมัติเบิกจ่ายตามรายละเอียดดังต่อไปนี้</p><div class="facts">ผู้ขอเบิก: '+esc(r.requesterName)+'<br>หน่วยงาน: '+esc(r.unit)+'<br>ประเภท: '+esc(r.requestType)+'<br>แหล่งเงิน: '+esc(r.fundSource)+' / หมวด: '+esc(r.category)+'</div>')+'<table><thead><tr><th>รายการ</th><th class="right">จำนวน</th><th class="right">จำนวนเงิน (บาท)</th></tr></thead><tbody>'+items+'</tbody><tfoot><tr><th colspan="2" class="right">รวมทั้งสิ้น</th><th class="right">'+money(amount)+'</th></tr></tfoot></table><p><b>จำนวนเงินตัวอักษร:</b> ('+esc(thaiAmount(amount))+')</p>'+(kind==='receipt'?'<p>หลักฐานการจ่าย: '+d.payments.map(function(p){return date(p.paymentDate)+' '+esc(p.method)+' '+esc(p.reference)}).join(' / ')+'</p><div class="signs"><div>ลงชื่อ ........................................ ผู้รับเงิน<br>('+esc(r.payeeName)+')</div><div>ลงชื่อ ........................................ ผู้จ่ายเงิน<br>(........................................)</div></div>':'<div class="signs"><div>ลงชื่อ ........................................ ผู้ขอเบิก<br>('+esc(r.requesterName)+')</div><div>ลงชื่อ ........................................ เจ้าหน้าที่การเงิน<br>(........................................)</div><div>□ อนุมัติ &nbsp; □ ไม่อนุมัติ<br>ลงชื่อ ........................................ ผู้มีอำนาจอนุมัติ<br>(........................................)</div></div><p class="small">ผลอนุมัติในระบบเป็นบันทึกการดำเนินการ กรุณาลงนามเอกสารตามระเบียบของหน่วยงาน</p>');var html='<!doctype html><html lang="th"><head><meta charset="utf-8"><title>'+heading+'</title><style>@page{size:A4;margin:18mm 18mm 17mm}body{font-family:Tahoma,sans-serif;color:#111;font-size:14px;line-height:1.65}h1{text-align:center;font-size:20px;margin:24px 0 13px}header{text-align:center}.org{font-weight:bold}.meta{display:flex;justify-content:space-between;border-top:1px solid #777;border-bottom:1px solid #777;padding:7px 0;margin:13px 0}.facts{margin:10px 0}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border:1px solid #777;padding:7px;vertical-align:top}th{background:#eee}.right{text-align:right}.signs{display:flex;justify-content:space-around;gap:15px;margin-top:58px;flex-wrap:wrap}.signs div{text-align:center;min-width:42%;margin-bottom:38px}.small{font-size:11px;color:#444}button{position:fixed;top:8px;right:8px;padding:8px}@media print{button{display:none}}</style></head><body><button onclick="window.print()">พิมพ์</button>'+body+'</body></html>';var win=window.open('','_blank');if(!win){toast('เบราว์เซอร์บล็อกหน้าพิมพ์ กรุณาอนุญาต pop-up',true);return}win.document.open();win.document.write(html);win.document.close()}
+  document.addEventListener('click',function(e){if(e.target.id==='logoutBtn'||e.target.id==='switchAccountBtn'){signOut();return}if(e.target.id==='changePasswordBtn'){showChange();return}if(e.target.id==='newUserBtn'){var uf=$('userForm');uf.reset();uf.elements.existing.value='';uf.elements.username.readOnly=false;return}var page=e.target.closest('[data-page]');if(page){navigate(page.dataset.page);return}var row=e.target.closest('[data-open]');if(row){openDetail(row.dataset.open);return}var action=e.target.closest('[data-action]');if(action){detailAction(action.dataset.action);return}var dl=e.target.closest('[data-download]');if(dl){downloadFile(dl.dataset.download);return}var rm=e.target.closest('[data-remove-attachment]');if(rm){removeFile(rm.dataset.removeAttachment);return}if(e.target.id==='refreshBtn'){refresh();return}if(e.target.id==='addItem'){$('itemRows').insertAdjacentHTML('beforeend',itemRow());calcFormTotal();return}if(e.target.closest('[data-remove-item]')){var rows=document.querySelectorAll('.item-row');if(rows.length>1)e.target.closest('.item-row').remove();calcFormTotal();return}if(e.target.id==='clearForm'){state.editing=null;renderForm();return}if(e.target.id==='runReport'){runReport();return}if(e.target.id==='exportCsv'){downloadCsv();return}if(e.target.id==='syncChecklists'){syncChecklistFields(state.bootstrap.settings.checklists);return}var userRow=e.target.closest('[data-user]');if(userRow){var u=state.bootstrap.users.filter(function(x){return (x.username||x.email)===userRow.dataset.user})[0];if(u){var f=$('userForm');f.elements.existing.value=u.username?'yes':'';f.elements.username.value=u.username||'';f.elements.username.readOnly=!!u.username;f.elements.email.value=u.email&&u.email.indexOf('login:')!==0?u.email:'';f.elements.password.value='';f.elements.name.value=u.name;f.elements.role.value=u.role;f.elements.active.checked=u.active;f.scrollIntoView({behavior:'smooth'})}}});
+  document.addEventListener('input',function(e){if(e.target.closest('.item-row'))calcFormTotal();if(e.target.id==='registrySearch')filterRegistry()});
+  document.addEventListener('change',function(e){if(e.target.id==='fundSourceSelect')toggleCustomFundSource();if(['registryStatus','registryYear','registryFund'].indexOf(e.target.id)>=0)filterRegistry()});
+  document.addEventListener('submit',function(e){if(e.target.id==='loginForm'){e.preventDefault();submitLogin();return}if(e.target.id==='changePasswordForm'){e.preventDefault();submitPasswordChange();return}if(e.target.id==='requestForm'){e.preventDefault();saveForm()}if(e.target.id==='paymentForm'){e.preventDefault();pay()}if(e.target.id==='budgetForm'){e.preventDefault();saveBudget()}if(e.target.id==='settingsForm'){e.preventDefault();saveSettings()}if(e.target.id==='userForm'){e.preventDefault();saveUser()}});
+  $('overlay').addEventListener('click',function(e){if(e.target===$('overlay'))closeDetail()});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&state.detail)closeDetail()});
+  refresh();
+})();
+</script>
+</body>
+</html>
